@@ -94,6 +94,11 @@ def main() -> int:
         action="store_true",
         help="Convenience flag: set max_new_tokens=128, repetition_penalty=1.1, no_repeat_ngram_size=4",
     )
+    p.add_argument(
+        "--aggressive-qc",
+        action="store_true",
+        help="Optional multi-gate QC filter (off by default; can drop noisy rows before scoring).",
+    )
 
     p.add_argument(
         "--audio",

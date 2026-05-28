@@ -1,0 +1,4 @@
+peft>=0.15.0
+bitsandbytes>=0.43.0
+jiwer>=3.0.0
+torchaudio>=2.1.0

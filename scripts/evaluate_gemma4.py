@@ -86,6 +86,14 @@ def main() -> int:
         help="Drop clips longer than SEC when chunking is disabled.",
     )
     p.add_argument("--fp16", action="store_true", help="Load base model in float16 (default: bfloat16)")
+    p.add_argument("--max-new-tokens", type=int, default=256, dest="max_new_tokens")
+    p.add_argument("--repetition-penalty", type=float, default=None, dest="repetition_penalty")
+    p.add_argument("--no-repeat-ngram-size", type=int, default=None, dest="no_repeat_ngram_size")
+    p.add_argument(
+        "--anti-loop-decode",
+        action="store_true",
+        help="Convenience flag: set max_new_tokens=128, repetition_penalty=1.1, no_repeat_ngram_size=4",
+    )
 
     p.add_argument(
         "--audio",
@@ -103,6 +111,14 @@ def main() -> int:
 
     add_normalize_arg(p, default=TEXT_NORMALIZE_EVAL_DEFAULT)
     args = p.parse_args()
+
+    if args.anti_loop_decode:
+        if args.max_new_tokens == 256:
+            args.max_new_tokens = 128
+        if args.repetition_penalty is None:
+            args.repetition_penalty = 1.1
+        if args.no_repeat_ngram_size is None:
+            args.no_repeat_ngram_size = 4
 
     if args.smoke:
         if args.max_samples is None:

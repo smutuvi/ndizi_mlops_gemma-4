@@ -41,6 +41,9 @@ def gemma_transcribe_chunked(
     chunk_length_s: float = MAX_AUDIO_SEC,
     stride_length_s: float | None = None,
     instruction: str = ASR_INSTRUCTION,
+    max_new_tokens: int = 256,
+    repetition_penalty: float | None = None,
+    no_repeat_ngram_size: int | None = None,
 ) -> list[str]:
     """Transcribe each clip; long audio is split into chunks and hypotheses are joined."""
     results: list[str] = []
@@ -53,7 +56,15 @@ def gemma_transcribe_chunked(
         )
         parts: list[str] = []
         for chunk in chunks:
-            hyp = gemma_transcribe(model, processor, [chunk], instruction=instruction)[0]
+            hyp = gemma_transcribe(
+                model,
+                processor,
+                [chunk],
+                instruction=instruction,
+                max_new_tokens=max_new_tokens,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=no_repeat_ngram_size,
+            )[0]
             hyp = str(hyp).strip()
             if hyp:
                 parts.append(hyp)
@@ -84,6 +95,9 @@ def make_gemma_predict_fn(
     *,
     chunk_length_s: float | None = None,
     stride_length_s: float | None = None,
+    max_new_tokens: int = 256,
+    repetition_penalty: float | None = None,
+    no_repeat_ngram_size: int | None = None,
 ):
     if chunk_length_s is not None and chunk_length_s > 0:
         cls = chunk_length_s
@@ -91,9 +105,23 @@ def make_gemma_predict_fn(
 
         def predict(audios):
             return gemma_transcribe_chunked(
-                model, processor, audios, chunk_length_s=cls, stride_length_s=st
+                model,
+                processor,
+                audios,
+                chunk_length_s=cls,
+                stride_length_s=st,
+                max_new_tokens=max_new_tokens,
+                repetition_penalty=repetition_penalty,
+                no_repeat_ngram_size=no_repeat_ngram_size,
             )
 
         return predict
 
-    return lambda audios: gemma_transcribe(model, processor, audios)
+    return lambda audios: gemma_transcribe(
+        model,
+        processor,
+        audios,
+        max_new_tokens=max_new_tokens,
+        repetition_penalty=repetition_penalty,
+        no_repeat_ngram_size=no_repeat_ngram_size,
+    )

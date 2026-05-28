@@ -122,8 +122,17 @@ def run_transcribe_file(args) -> None:
 
         dur = len(resample_mono_16k(audio)) / 16000.0
         chunk_s = resolve_chunk_length_s(None, max_clip_duration_s=dur, auto_chunk_long=True)
+    max_new = int(getattr(args, "max_new_tokens", 256))
+    rep_pen = getattr(args, "repetition_penalty", None)
+    nrep = getattr(args, "no_repeat_ngram_size", None)
     predict = make_gemma_predict_fn(
-        model, processor, chunk_length_s=chunk_s, stride_length_s=stride_s
+        model,
+        processor,
+        chunk_length_s=chunk_s,
+        stride_length_s=stride_s,
+        max_new_tokens=max_new,
+        repetition_penalty=rep_pen,
+        no_repeat_ngram_size=nrep,
     )
     hyp = predict([audio])[0]
 
@@ -171,6 +180,9 @@ def run_evaluate(args) -> None:
     stride_s = getattr(args, "stride_length_s", None)
     max_audio_seconds = getattr(args, "max_audio_seconds", None)
     auto_chunk = not bool(getattr(args, "no_auto_chunk", False))
+    max_new = int(getattr(args, "max_new_tokens", 256))
+    rep_pen = getattr(args, "repetition_penalty", None)
+    nrep = getattr(args, "no_repeat_ngram_size", None)
 
     all_refs: list[str] = []
     all_hyps: list[str] = []
@@ -199,7 +211,13 @@ def run_evaluate(args) -> None:
 
         print(f"\n[finetuned] {name} ({len(eval_split)} rows, chunk_length_s={chunk_s})")
         predict = make_gemma_predict_fn(
-            model, processor, chunk_length_s=chunk_s, stride_length_s=stride_s
+            model,
+            processor,
+            chunk_length_s=chunk_s,
+            stride_length_s=stride_s,
+            max_new_tokens=max_new,
+            repetition_penalty=rep_pen,
+            no_repeat_ngram_size=nrep,
         )
         refs, hyps, groups = eval_with(
             predict,

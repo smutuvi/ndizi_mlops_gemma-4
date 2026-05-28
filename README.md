@@ -13,17 +13,26 @@ Install:
 python -m pip install -r requirements.txt
 ```
 
-Prepare merged dataset artifacts:
+Prepare merged dataset artifacts (**no** `--aggressive-qc` for the ~0.40 WER baseline):
 
 ```bash
 python run_pipeline.py prepare --chunk-long-audio --chunk-test
 ```
 
-Train LoRA adapter:
+Train LoRA adapter (baseline recipe; see `docs/BASELINE_0.40_WER.md`):
 
 ```bash
-python scripts/train_gemma4.py --no-4bit --replay-ratio 0.05 --lr 1e-4 --epochs 2.0
+python scripts/train_gemma4.py \
+  --model E2B \
+  --replay-ratio 0.05 \
+  --lr 1e-4 \
+  --epochs 2 \
+  --grad-accum 16 \
+  --eval-max-samples 64 \
+  --save-steps 500
 ```
+
+To restore after a QC retrain hurt WER: `bash bash_scripts/restore_baseline_0p40_wer.sh`
 
 Evaluate finetuned adapter on Hub test splits (writes `metrics.json`, `predictions.json`, `predictions.csv`):
 
@@ -33,7 +42,8 @@ python scripts/evaluate_gemma4.py \
   --test_datasets smutuvi/ndizi-1:test smutuvi/ndizi-1-2025:test \
   --output_dir eval/gemma4-e2b-finetuned \
   --chunk_length_s 30 \
-  --normalize jiwer_default
+  --normalize jiwer_default \
+  --anti-loop-decode
 ```
 
 Baseline (pre-finetune) evaluation:

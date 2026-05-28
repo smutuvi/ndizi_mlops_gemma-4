@@ -3,7 +3,6 @@ from __future__ import annotations
 
 import logging
 from collections import Counter
-from dataclasses import replace
 from typing import Any
 
 from datasets import Dataset
@@ -45,10 +44,8 @@ def apply_qc_filter_dataset(
 
     def _keep(ex: dict) -> bool:
         audio = ex[AUDIO_COLUMN]
-        arr = audio["array"]
-        sr = int(audio["sampling_rate"])
         text = _text_for_qc(ex, use_may6=use_may6_text)
-        keep, reason = check_example(audio, arr, sr, text, cfg)
+        keep, reason = check_example(audio, text, cfg)
         counters[reason] += 1
         return keep
 

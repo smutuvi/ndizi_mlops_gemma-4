@@ -17,7 +17,7 @@ from src.utils.paths import PREPARED_LOCAL, RETENTION_PREPARED_LOCAL
 def _apply_qc_to_dataset_dict(ds: DatasetDict, args) -> DatasetDict:
     if not getattr(args, "aggressive_qc", False):
         return ds
-    if getattr(args, "aggressive_qc", False) and getattr(args, "chunk_long_audio", False):
+    if getattr(args, "aggressive_qc", False) and not getattr(args, "chunk_long_audio", False):
         print(
             "\nNOTE: --aggressive-qc without --chunk-long-audio drops clips longer than "
             f"{MAX_AUDIO_SEC:.0f}s (dur_high). For training, use both flags together.\n"

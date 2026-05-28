@@ -121,6 +121,51 @@ def apply_gemma4_lora(model: Any, lora_config: LoraConfig, *, debug_targets: boo
         ) from e
 
 
+def patch_gemma4_audio_ffn_finfo_for_kbit() -> None:
+    """
+    4-bit weights use non-float storage dtypes; Gemma4AudioFeedForward.forward calls
+    torch.finfo(self.ffw_layer_1.linear.weight.dtype) and crashes under QLoRA.
+    """
+    try:
+        import torch
+        import transformers.models.gemma4.modeling_gemma4 as modeling_gemma4
+    except ImportError as e:
+        raise RuntimeError("transformers Gemma 4 modeling not available") from e
+
+    cls = modeling_gemma4.Gemma4AudioFeedForward
+    if getattr(cls, "_ndizi_kbit_finfo_patch", False):
+        return
+
+    def forward(self, hidden_states: "torch.Tensor") -> "torch.Tensor":
+        wdtype = self.ffw_layer_1.linear.weight.dtype
+        if getattr(wdtype, "is_floating_point", False):
+            finfo_dtype = wdtype
+        elif hidden_states.is_floating_point():
+            finfo_dtype = hidden_states.dtype
+        else:
+            finfo_dtype = torch.bfloat16
+        gradient_clipping = min(self.gradient_clipping, torch.finfo(finfo_dtype).max)
+
+        residual = hidden_states
+        hidden_states = torch.clamp(hidden_states, -gradient_clipping, gradient_clipping)
+        hidden_states = self.pre_layer_norm(hidden_states)
+
+        hidden_states = self.ffw_layer_1(hidden_states)
+        hidden_states = self.act_fn(hidden_states)
+        hidden_states = self.ffw_layer_2(hidden_states)
+
+        hidden_states = torch.clamp(hidden_states, -gradient_clipping, gradient_clipping)
+        hidden_states = self.post_layer_norm(hidden_states)
+        hidden_states *= self.post_layer_scale
+        hidden_states += residual
+
+        return hidden_states
+
+    cls.forward = forward  # type: ignore[method-assign]
+    cls._ndizi_kbit_finfo_patch = True  # type: ignore[attr-defined]
+    logger.info("Patched Gemma4AudioFeedForward.forward for 4-bit QLoRA (safe torch.finfo)")
+
+
 def patch_clippable_linear_for_peft() -> None:
     """
     Last-resort monkey-patch so ClippableLinear passes isinstance(..., nn.Linear).

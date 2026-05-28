@@ -15,6 +15,7 @@ from src.models.gemma4_lora import (
     build_gemma4_lora_config,
     patch_clippable_linear_for_peft,
     patch_gemma4_audio_finfo_for_kbit,
+    patch_gemma4_masked_scatter_dtype,
 )
 from src.training.collator import GemmaASRCollator
 from src.training.gemma_trainer import GemmaASRTrainer
@@ -22,7 +23,7 @@ from src.training.retention import maybe_load_retention_replay_train
 from src.utils.paths import CHECKPOINT_DIR, PREPARED_LOCAL
 from src.utils.runtime import get_runtime
 
-# Keep bf16 (not 4-bit) — audio tower uses torch.finfo(weight.dtype) and breaks on Linear4bit.
+# Optional: keep multimodal heads in bf16 (finfo patches handle quantized audio tower).
 _MODULES_TO_NOT_CONVERT_4BIT = [
     "lm_head",
     "audio_tower",
@@ -84,6 +85,7 @@ def run_train(cli_args) -> None:
 
     use_4bit = not bool(getattr(cli_args, "no_4bit", False))
     if use_4bit:
+        patch_gemma4_masked_scatter_dtype()
         patch_gemma4_audio_finfo_for_kbit()
     if getattr(cli_args, "peft_clippable_patch", False):
         patch_clippable_linear_for_peft()

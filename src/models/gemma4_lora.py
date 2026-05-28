@@ -142,6 +142,34 @@ def _gradient_clip_cap(
     return min(float(gradient_clipping), float(torch.finfo(finfo_dtype).max))
 
 
+def patch_gemma4_masked_scatter_dtype() -> None:
+    """
+    Gemma4Model merges audio with inputs_embeds via masked_scatter but only casts device,
+    not dtype (vision/image paths cast both). Under 4-bit QLoRA, embeds are often float32
+    and audio features bfloat16 → RuntimeError. Align source dtype to self.dtype.
+    """
+    import torch
+
+    if getattr(torch.Tensor, "_ndizi_masked_scatter_dtype_patch", False):
+        return
+
+    _orig = torch.Tensor.masked_scatter
+
+    def masked_scatter(self, mask, source):  # type: ignore[no-untyped-def]
+        if (
+            self.is_floating_point()
+            and isinstance(source, torch.Tensor)
+            and source.is_floating_point()
+            and self.dtype != source.dtype
+        ):
+            source = source.to(device=source.device, dtype=self.dtype)
+        return _orig(self, mask, source)
+
+    torch.Tensor.masked_scatter = masked_scatter  # type: ignore[method-assign]
+    torch.Tensor._ndizi_masked_scatter_dtype_patch = True  # type: ignore[attr-defined]
+    print("[train] Patched torch.Tensor.masked_scatter for mixed float32/bfloat16 multimodal merge")
+
+
 def patch_gemma4_audio_finfo_for_kbit() -> list[str]:
     """
     Under 4-bit QLoRA, audio tower Linear4bit weights can report uint8 storage dtypes.

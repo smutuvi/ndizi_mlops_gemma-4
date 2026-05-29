@@ -2,7 +2,18 @@
 
 This documents the setup that produced **pooled `wer_normalized` ≈ 0.41** on Hub test
 (`smutuvi/ndizi-1:test` + `smutuvi/ndizi-1-2025:test`, n=1041, chunk 30s, `jiwer_default`).
-See local `predictions/metrics.json` from that run.
+See `predictions/metrics.json` (eval dir `gemma4-eval-run-chuncked`) and
+`configs/baseline/e2b_wer_0.41_recipe.yaml`.
+
+## Which git version?
+
+| Piece | Commit / tag | Notes |
+|-------|----------------|-------|
+| **Recorded eval (0.410 norm WER)** | `d1a6559` · tag `baseline-wer-0.41-2026-05-28` | Eval + anti-loop flags added; your saved run did **not** use anti-loop in `run_info` |
+| **Before QC prepare** | stop before `194ca2f` | `--aggressive-qc` on prepare changes data and hurts this baseline |
+| **Train on server today** | `main` (`4c325cd`+) | Keep **commands** below; use latest code for 4-bit `torch.finfo` / `masked_scatter` fixes |
+
+**Weights are not in git.** `artifacts/checkpoints/best` from that train must be backed up or retrained.
 
 ## What likely made WER worse
 
@@ -77,7 +88,17 @@ rm -rf artifacts/checkpoints/best
 cp -a artifacts/checkpoints/best-before-restore-YYYYMMDD artifacts/checkpoints/best
 ```
 
+## Revert code only (checkout old scripts)
+
+```bash
+cd ~/ndizi_mlops_gemma-4
+git fetch origin
+git checkout baseline-wer-0.41-2026-05-28   # scripts at d1a6559 era
+# For training on 4-bit, merge fixes: git checkout main -- src/models/gemma4_lora.py src/training/train.py
+```
+
 ## Git reference
 
-Good eval stack (anti-loop, jiwer): from `d1a6559` onward.  
-QC on **prepare** was added in `194ca2f` — opt-in only; avoid for this baseline.
+- Tag: `baseline-wer-0.41-2026-05-28` → `d1a6559`
+- QC on **prepare**: `194ca2f` — avoid for this baseline
+- Train crash fixes: `2ee05fc` … `4c325cd` on `main`

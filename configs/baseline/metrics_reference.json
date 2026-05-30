@@ -1,0 +1,29 @@
+{
+  "text_normalize": "jiwer_default",
+  "pooled": {
+    "wer": 0.45203105339379407,
+    "cer": 0.19110576066902688,
+    "n_utterances": 1041,
+    "wer_normalized": 0.40982788132369724,
+    "cer_normalized": 0.16587295491205162
+  },
+  "per_set": {
+    "smutuvi/ndizi-1:test": {
+      "wer_normalized": 0.4367050725721981,
+      "n": 690,
+      "chunk_length_s": 30.0
+    },
+    "smutuvi/ndizi-1-2025:test": {
+      "wer_normalized": 0.3629663448995565,
+      "n": 351,
+      "chunk_length_s": 30.0
+    }
+  },
+  "run_info": {
+    "checkpoint": "artifacts/checkpoints/best",
+    "base_model_id": "google/gemma-4-E2B-it",
+    "output_dir": "eval/gemma4-eval-run-chuncked",
+    "chunk_length_s": 30.0,
+    "batch_size": 4
+  }
+}

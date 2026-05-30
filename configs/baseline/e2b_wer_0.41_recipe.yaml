@@ -1,0 +1,84 @@
+# Frozen recipe: pooled wer_normalized ≈ 0.410 (n=1041 Hub test).
+# Ground truth: predictions/metrics.json (also configs/baseline/metrics_reference.json)
+# Recorded eval dir on server: eval/gemma4-eval-run-chuncked
+
+model: E2B
+base_model_id: google/gemma-4-E2B-it
+checkpoint: artifacts/checkpoints/best
+
+# --- What you need to reproduce the NUMBER ---
+# 1) This git recipe (prepare + train + eval flags below)
+# 2) The LoRA weights in artifacts/checkpoints/best from THAT train run
+#    (not in git — back up before retrain; or load from Hub if you pushed)
+# 3) Do NOT use prepare --aggressive-qc (added later; hurt WER when retrained)
+
+prepare:
+  script: scripts/prepare_gemma4.py
+  args:
+    - --chunk-long-audio
+    - --chunk-test
+  forbidden:
+    - --aggressive-qc
+    - --qc-chunk-long-with-mms-fa
+
+train:
+  script: scripts/train_gemma4.py
+  args:
+    - --model
+    - E2B
+    - --replay-ratio
+    - "0.05"
+    - --lr
+    - "1e-4"
+    - --epochs
+    - "2"
+    - --grad-accum
+    - "16"
+    - --eval-max-samples
+    - "64"
+    - --save-steps
+    - "500"
+  defaults:
+    four_bit_qlora: true
+    lora_r: 32
+    lora_alpha: 64
+    batch_size: 1
+    warmup_ratio: 0.03
+    lr_scheduler: cosine
+
+# Exact eval that produced metrics.json (no --anti-loop-decode in run_info)
+eval_recorded_0_41:
+  script: scripts/evaluate_gemma4.py
+  args:
+    - --model
+    - E2B
+    - --checkpoint
+    - artifacts/checkpoints/best
+    - --test_datasets
+    - smutuvi/ndizi-1:test
+    - smutuvi/ndizi-1-2025:test
+    - --output_dir
+    - eval/gemma4-eval-run-chuncked
+    - --chunk_length_s
+    - "30"
+    - --batch-size
+    - "4"
+    - --normalize
+    - jiwer_default
+  metrics:
+    wer_normalized: 0.40982788132369724
+    wer_raw: 0.45203105339379407
+    cer_normalized: 0.16587295491205162
+    n_utterances: 1041
+
+eval_recommended_decode:
+  note: "Optional; may change WER slightly vs recorded run"
+  adds:
+    - --anti-loop-decode
+
+git:
+  tag_eval_era: baseline-wer-0.41-2026-05-28
+  commit_eval_era: d1a655920e0a736ecab75d614120e8482ef91c57
+  commit_train_use: main
+  commit_train_min: 323f948
+  note: "Use main@323f948+ for 4-bit train; tag d1a6559 is eval-era only"

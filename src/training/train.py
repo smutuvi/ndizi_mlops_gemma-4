@@ -10,26 +10,12 @@ from jiwer import wer
 from peft import prepare_model_for_kbit_training
 from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig, Trainer, TrainingArguments
 
-from src.models.gemma4_lora import (
-    apply_gemma4_lora,
-    build_gemma4_lora_config,
-    patch_clippable_linear_for_peft,
-    patch_gemma4_audio_finfo_for_kbit,
-    patch_gemma4_masked_scatter_dtype,
-)
+from src.models.gemma4_lora import apply_gemma4_lora, build_gemma4_lora_config, patch_clippable_linear_for_peft
 from src.training.collator import GemmaASRCollator
 from src.training.gemma_trainer import GemmaASRTrainer
 from src.training.retention import maybe_load_retention_replay_train
 from src.utils.paths import CHECKPOINT_DIR, PREPARED_LOCAL
 from src.utils.runtime import get_runtime
-
-# Optional: keep multimodal heads in bf16 (finfo patches handle quantized audio tower).
-_MODULES_TO_NOT_CONVERT_4BIT = [
-    "lm_head",
-    "audio_tower",
-    "multi_modal_projector",
-    "audio_projector",
-]
 
 
 def _training_arguments(**kwargs):
@@ -84,9 +70,6 @@ def run_train(cli_args) -> None:
     processor = AutoProcessor.from_pretrained(rt.base_model_id, padding_side="left")
 
     use_4bit = not bool(getattr(cli_args, "no_4bit", False))
-    if use_4bit:
-        patch_gemma4_masked_scatter_dtype()
-        patch_gemma4_audio_finfo_for_kbit()
     if getattr(cli_args, "peft_clippable_patch", False):
         patch_clippable_linear_for_peft()
 
@@ -103,15 +86,7 @@ def run_train(cli_args) -> None:
             bnb_4bit_compute_dtype=torch.bfloat16,
         )
         load_kw["quantization_config"] = bnb
-        prep_sig = inspect.signature(AutoModelForMultimodalLM.from_pretrained)
-        if "modules_to_not_convert" in prep_sig.parameters:
-            load_kw["modules_to_not_convert"] = list(_MODULES_TO_NOT_CONVERT_4BIT)
-            print(
-                "[train] Loading 4-bit QLoRA; modules_to_not_convert="
-                + ",".join(_MODULES_TO_NOT_CONVERT_4BIT)
-            )
-        else:
-            print("[train] Loading 4-bit QLoRA (BitsAndBytes nf4; audio finfo patches applied)")
+        print("[train] Loading base model with 4-bit QLoRA (BitsAndBytes nf4)")
     else:
         print("[train] Loading base model in bf16 (no 4-bit); needs more VRAM but avoids ClippableLinear LoRA issues")
 
@@ -164,20 +139,15 @@ def run_train(cli_args) -> None:
     if "save_strategy" in ta_sig.parameters:
         strategy_kw["save_strategy"] = "steps"
 
-    grad_accum = int(getattr(cli_args, "grad_accum", 16))
-    num_epochs = float(getattr(cli_args, "epochs", 2.0))
-    warmup_ratio = float(getattr(cli_args, "warmup_ratio", 0.03))
-    steps_per_epoch = max(1, len(train_ds) // max(grad_accum, 1))
-    total_steps = max(1, int(num_epochs * steps_per_epoch))
-
     ta_kw = dict(
         output_dir=str(CHECKPOINT_DIR),
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
-        gradient_accumulation_steps=grad_accum,
-        num_train_epochs=num_epochs,
+        gradient_accumulation_steps=int(getattr(cli_args, "grad_accum", 16)),
+        num_train_epochs=float(getattr(cli_args, "epochs", 2.0)),
         learning_rate=float(getattr(cli_args, "lr", 2e-4)),
         lr_scheduler_type=str(getattr(cli_args, "lr_scheduler", "cosine")),
+        warmup_ratio=float(getattr(cli_args, "warmup_ratio", 0.03)),
         bf16=True,
         gradient_checkpointing=True,
         gradient_checkpointing_kwargs={"use_reentrant": False},
@@ -192,10 +162,6 @@ def run_train(cli_args) -> None:
     )
     if not skip_eval:
         ta_kw["metric_for_best_model"] = "wer"
-    if "warmup_steps" in ta_sig.parameters:
-        ta_kw["warmup_steps"] = max(1, int(warmup_ratio * total_steps))
-    elif "warmup_ratio" in ta_sig.parameters:
-        ta_kw["warmup_ratio"] = warmup_ratio
     training_args = _training_arguments(**{**ta_kw, **strategy_kw})
 
     trainer_kw = dict(

@@ -82,26 +82,6 @@ def _row_meta(ds) -> list[dict]:
     return meta
 
 
-def _apply_aggressive_qc(ds):
-    """Optional QC filter (slow). Returns (filtered_ds, dropped, reason_counts)."""
-    from collections import Counter
-
-    from src.data.qc import QCConfig, check_example
-
-    cfg = QCConfig()
-    keep_idx = []
-    reasons = Counter()
-    for i in range(len(ds)):
-        row = ds[i]
-        ok, reason = check_example(row.get(AUDIO_COLUMN), str(row.get(TEXT_COLUMN) or ""), cfg)
-        if ok:
-            keep_idx.append(i)
-        else:
-            reasons[reason] += 1
-    dropped = len(ds) - len(keep_idx)
-    return (ds.select(keep_idx) if dropped else ds), dropped, dict(reasons)
-
-
 def _load_eval_tests(args) -> dict:
     if getattr(args, "test_datasets", None):
         return load_hub_eval_splits(
@@ -229,15 +209,6 @@ def run_evaluate(args) -> None:
             if dropped:
                 print(f"[finetuned] {name}: dropped {dropped} clips > {max_audio_seconds}s")
 
-        dropped_qc = 0
-        qc_reasons = None
-        if bool(getattr(args, "aggressive_qc", False)):
-            eval_split, dropped_qc, qc_reasons = _apply_aggressive_qc(eval_split)
-            if dropped_qc:
-                # Print first few keys only (counts are in metrics.json)
-                top = list(qc_reasons.items())[:5]
-                print(f"[finetuned] {name}: aggressive_qc dropped {dropped_qc} rows (top={top})")
-
         print(f"\n[finetuned] {name} ({len(eval_split)} rows, chunk_length_s={chunk_s})")
         predict = make_gemma_predict_fn(
             model,
@@ -260,8 +231,6 @@ def run_evaluate(args) -> None:
             "cer": scores_raw["pooled"]["cer"],
             "n": scores_raw["pooled"]["n"],
             "dropped_long": dropped,
-            "dropped_qc": dropped_qc,
-            "qc_reasons": qc_reasons,
             "chunk_length_s": chunk_s,
         }
         if text_mode != "none":

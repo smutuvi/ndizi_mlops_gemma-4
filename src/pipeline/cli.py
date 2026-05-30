@@ -49,14 +49,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_prep.add_argument("--retention-chunk-test", action="store_true")
     p_prep.add_argument("--chunk-long-audio", action="store_true")
     p_prep.add_argument("--chunk-test", action="store_true")
-    p_prep.add_argument(
-        "--aggressive-qc",
-        action="store_true",
-        help="Multi-gate QC on each Hub split before merge (not default).",
-    )
-    p_prep.add_argument("--qc-use-may6-text-norm", action="store_true")
-    p_prep.add_argument("--qc-chunk-long-with-mms-fa", action="store_true")
-    p_prep.add_argument("--qc-chunk-seconds", type=float, default=30.0, dest="qc_chunk_seconds")
 
     p_base = sub.add_parser("baseline", parents=[model_parent], help="Zero-shot WER/CER")
     p_base.add_argument("--with-whisper", action="store_true")
@@ -110,10 +102,6 @@ def build_parser() -> argparse.ArgumentParser:
     p_all.add_argument("--push-prepared", action="store_true")
     p_all.add_argument("--chunk-long-audio", action="store_true")
     p_all.add_argument("--chunk-test", action="store_true")
-    p_all.add_argument("--aggressive-qc", action="store_true")
-    p_all.add_argument("--qc-use-may6-text-norm", action="store_true")
-    p_all.add_argument("--qc-chunk-long-with-mms-fa", action="store_true")
-    p_all.add_argument("--qc-chunk-seconds", type=float, default=30.0, dest="qc_chunk_seconds")
     p_all.add_argument("--retention-datasets", nargs="+", default=[])
     p_all.add_argument("--retention-eval", action="store_true")
     p_all.add_argument("--replay-ratio", type=float, default=0.0)
@@ -186,10 +174,6 @@ def main(argv: list[str] | None = None) -> int:
             chunk_test=args.chunk_test,
             retention_datasets=args.retention_datasets,
             retention_chunk_test=False,
-            aggressive_qc=getattr(args, "aggressive_qc", False),
-            qc_use_may6_text_norm=getattr(args, "qc_use_may6_text_norm", False),
-            qc_chunk_long_with_mms_fa=getattr(args, "qc_chunk_long_with_mms_fa", False),
-            qc_chunk_seconds=getattr(args, "qc_chunk_seconds", 30.0),
         )
         run_prepare(prep_args)
         base_args = argparse.Namespace(

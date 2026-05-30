@@ -1,4 +1,4 @@
-# src/data/prepare.py — standardize, chunk, QC-filter, and merge Ndizi Hub datasets to disk.
+# src/data/prepare.py — standardize, chunk, and merge Ndizi Hub datasets to disk.
 from __future__ import annotations
 
 import shutil
@@ -8,28 +8,9 @@ from datasets import Audio, DatasetDict, concatenate_datasets, load_dataset
 
 from src.data.dataset_loader import load_asr_dataset_specs
 from src.data.mms_fa_chunk import add_chunk_index_zero, align_and_chunk_long_clips
-from src.data.qc_prepare import prepare_split_with_qc, qc_config_from_prepare_args
 from src.data.splits import split_spec_list
 from src.utils.constants import AUDIO_COLUMN, MAX_AUDIO_SEC, PREPARED_REPO, SRC_DATASETS, TEXT_COLUMN, TARGET_SR
 from src.utils.paths import PREPARED_LOCAL, RETENTION_PREPARED_LOCAL
-
-
-def _apply_qc_to_dataset_dict(ds: DatasetDict, args) -> DatasetDict:
-    if not getattr(args, "aggressive_qc", False):
-        return ds
-    if getattr(args, "aggressive_qc", False) and not getattr(args, "chunk_long_audio", False):
-        print(
-            "\nNOTE: --aggressive-qc without --chunk-long-audio drops clips longer than "
-            f"{MAX_AUDIO_SEC:.0f}s (dur_high). For training, use both flags together.\n"
-        )
-    cfg = qc_config_from_prepare_args(args)
-    use_may6 = bool(getattr(args, "qc_use_may6_text_norm", False))
-    print(f"\nAggressive QC enabled (max_dur={cfg.max_dur:.1f}s, may6_text={use_may6})")
-    out = DatasetDict()
-    for split_name, split in ds.items():
-        filtered, stats = prepare_split_with_qc(split, cfg, split_name=split_name, use_may6_text=use_may6)
-        out[split_name] = filtered
-    return out
 
 
 def run_prepare(args) -> None:
@@ -41,7 +22,6 @@ def run_prepare(args) -> None:
         print(f"\nPreparing {name}...")
         ds = load_dataset(name)
         ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=TARGET_SR))
-        ds = _apply_qc_to_dataset_dict(ds, args)
 
         for split_name, split in ds.items():
             n_total = len(split)
@@ -151,14 +131,6 @@ def run_prepare(args) -> None:
             chunk_long_audio=bool(args.chunk_long_audio),
             chunk_test=bool(getattr(args, "retention_chunk_test", False)),
         )
-        if getattr(args, "aggressive_qc", False):
-            ret_cfg = qc_config_from_prepare_args(args)
-            use_may6 = bool(getattr(args, "qc_use_may6_text_norm", False))
-            for split_name in list(ret_dd.keys()):
-                filtered, _ = prepare_split_with_qc(
-                    ret_dd[split_name], ret_cfg, split_name=split_name, use_may6_text=use_may6
-                )
-                ret_dd[split_name] = filtered
         if RETENTION_PREPARED_LOCAL.exists():
             shutil.rmtree(RETENTION_PREPARED_LOCAL)
         ret_dd.save_to_disk(str(RETENTION_PREPARED_LOCAL))

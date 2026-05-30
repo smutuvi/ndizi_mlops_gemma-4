@@ -23,6 +23,18 @@ prepare:
 
 train:
   script: scripts/train_gemma4.py
+  shell: bash_scripts/train_baseline_0p40.sh
+  source_files:
+    - scripts/train_gemma4.py
+    - src/training/train.py
+    - src/training/collator.py
+    - src/training/gemma_trainer.py
+    - src/training/retention.py
+    - src/models/gemma4_lora.py
+    - src/inference/gemma_inputs.py
+    - src/utils/constants.py
+    - src/utils/runtime.py
+    - src/utils/paths.py
   args:
     - --model
     - E2B

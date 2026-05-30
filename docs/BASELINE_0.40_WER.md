@@ -59,15 +59,11 @@ Steps inside that script:
 2. **Train** — 4-bit QLoRA (default), replay 5%, lr 1e-4, 2 epochs:
 
    ```bash
-   python scripts/train_gemma4.py \
-     --model E2B \
-     --replay-ratio 0.05 \
-     --lr 1e-4 \
-     --epochs 2 \
-     --grad-accum 16 \
-     --eval-max-samples 64 \
-     --save-steps 500
+   bash bash_scripts/train_baseline_0p40.sh
    ```
+
+   Training implementation lives in `src/training/train.py` (called from `scripts/train_gemma4.py`).
+   LoRA + 4-bit patches: `src/models/gemma4_lora.py`. Batch-1 ASR collator: `src/training/collator.py`.
 
    Requires **main @ `323f948` or later** (4-bit audio-tower `torch.finfo` patches).
 

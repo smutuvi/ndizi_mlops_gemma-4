@@ -25,9 +25,9 @@ def simple_normalize(s: str) -> str:
 def try_build_jiwer_transforms() -> tuple[Any, Any]:
     import jiwer
 
-    # Important: don't glue words when stripping punctuation (e.g. "hii.Hapana" -> "hii hapana").
-    # We substitute non-word spans with a space before whitespace cleanup.
-    punct_to_space = jiwer.SubstituteRegexes([(r"[^\w\s']+", " ")])
+    # jiwer >=3.3 expects a dict for SubstituteRegexes (not a list of pairs).
+    # Substitute punctuation spans with space so "hii.Hapana" -> "hii hapana" (not "hiihapana").
+    punct_to_space = jiwer.SubstituteRegexes({r"[^\w\s']+": " "})
     tr_w = jiwer.Compose(
         [
             jiwer.ToLowerCase(),

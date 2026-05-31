@@ -14,6 +14,7 @@ from typing import Any
 
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
+from transformers import BitsAndBytesConfig
 
 logger = logging.getLogger(__name__)
 
@@ -22,6 +23,32 @@ DEFAULT_GEMMA4_LM_LORA_TARGETS = (
     r"^(?=.*\.language_model\.)(?!.*\.(?:audio_tower|vision_tower)\.).*"
     r"\.(?:self_attn|mlp)\.(?:q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$"
 )
+
+# Keep audio (and lm_head) in fp16/bf16 under 4-bit QLoRA — Gemma4ClippableLinear uses
+# torch.finfo(weight.dtype), which fails on bitsandbytes packed uint8 storage.
+# See: https://discuss.huggingface.co/t/issue-while-quantizing-gemma-4-e2b-e4b/176065
+GEMMA4_BNB_SKIP_MODULES = [
+    "lm_head",
+    "audio_tower",
+    "embed_audio",
+    "model.audio_tower",
+    "model.embed_audio",
+]
+
+
+def build_gemma4_bnb_config(*, compute_dtype=None):
+    """4-bit QLoRA config with audio tower left unquantized."""
+    import torch
+
+    if compute_dtype is None:
+        compute_dtype = torch.bfloat16
+    return BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=compute_dtype,
+        llm_int8_skip_modules=list(GEMMA4_BNB_SKIP_MODULES),
+    )
 
 
 def build_gemma4_lora_config(

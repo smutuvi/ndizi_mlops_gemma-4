@@ -8,9 +8,14 @@ import torch
 from datasets import interleave_datasets, load_from_disk
 from jiwer import wer
 from peft import prepare_model_for_kbit_training
-from transformers import AutoModelForMultimodalLM, AutoProcessor, BitsAndBytesConfig, Trainer, TrainingArguments
+from transformers import AutoModelForMultimodalLM, AutoProcessor, Trainer, TrainingArguments
 
-from src.models.gemma4_lora import apply_gemma4_lora, build_gemma4_lora_config, patch_clippable_linear_for_peft
+from src.models.gemma4_lora import (
+    apply_gemma4_lora,
+    build_gemma4_bnb_config,
+    build_gemma4_lora_config,
+    patch_clippable_linear_for_peft,
+)
 from src.training.collator import GemmaASRCollator
 from src.training.gemma_trainer import GemmaASRTrainer
 from src.training.retention import maybe_load_retention_replay_train
@@ -79,14 +84,8 @@ def run_train(cli_args) -> None:
         attn_implementation="sdpa",
     )
     if use_4bit:
-        bnb = BitsAndBytesConfig(
-            load_in_4bit=True,
-            bnb_4bit_quant_type="nf4",
-            bnb_4bit_use_double_quant=True,
-            bnb_4bit_compute_dtype=torch.bfloat16,
-        )
-        load_kw["quantization_config"] = bnb
-        print("[train] Loading base model with 4-bit QLoRA (BitsAndBytes nf4)")
+        load_kw["quantization_config"] = build_gemma4_bnb_config()
+        print("[train] Loading base model with 4-bit QLoRA (audio_tower skipped; bf16 compute)")
     else:
         print("[train] Loading base model in bf16 (no 4-bit); needs more VRAM but avoids ClippableLinear LoRA issues")
 

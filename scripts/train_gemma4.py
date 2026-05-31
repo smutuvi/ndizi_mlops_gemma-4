@@ -54,7 +54,7 @@ def main() -> int:
     p.add_argument(
         "--no-4bit",
         action="store_true",
-        help="Load bf16 weights instead of 4-bit QLoRA (more VRAM; use if PEFT fails on ClippableLinear).",
+        help="Load bf16 weights instead of 4-bit QLoRA (more VRAM; fallback if 4-bit audio still fails).",
     )
     p.add_argument(
         "--lora-target-modules",

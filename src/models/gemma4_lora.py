@@ -51,6 +51,57 @@ def build_gemma4_bnb_config(*, compute_dtype=None):
     )
 
 
+def align_gemma4_multimodal_dtypes(model: Any, *, dtype=None) -> None:
+    """
+    Cast text/audio embedding paths to bf16 so Gemma4 masked_scatter dtypes match under QLoRA.
+
+    With 4-bit LM + unquantized audio_tower, embed_tokens often stays float32 while audio
+    features are bfloat16, which triggers:
+      masked_scatter_: expected self and source to have same dtypes but got Float and BFloat16
+    """
+    import torch
+
+    if dtype is None:
+        dtype = torch.bfloat16
+    keys = (
+        "language_model.embed_tokens",
+        "embed_audio",
+        "audio_projector",
+        "multi_modal_projector",
+    )
+    touched: list[str] = []
+    for name, module in model.named_modules():
+        if any(k in name for k in keys):
+            module.to(dtype=dtype)
+            touched.append(name)
+    if touched:
+        logger.info(
+            "Aligned %d multimodal module(s) to %s for masked_scatter (e.g. %s)",
+            len(touched),
+            dtype,
+            touched[0],
+        )
+
+
+def patch_masked_scatter_dtype_compat() -> None:
+    """Align source dtype to destination before masked_scatter (Gemma 4 multimodal QLoRA)."""
+    import torch
+
+    if getattr(torch.Tensor, "_ndizi_masked_scatter_dtype_patch", False):
+        return
+
+    _orig = torch.Tensor.masked_scatter
+
+    def masked_scatter(self, mask, source):
+        if source.dtype != self.dtype:
+            source = source.to(dtype=self.dtype, device=source.device)
+        return _orig(self, mask, source)
+
+    torch.Tensor.masked_scatter = masked_scatter  # type: ignore[method-assign]
+    torch.Tensor._ndizi_masked_scatter_dtype_patch = True  # type: ignore[attr-defined]
+    logger.info("Patched torch.Tensor.masked_scatter for dtype alignment (Gemma 4 QLoRA)")
+
+
 def build_gemma4_lora_config(
     *,
     r: int = 32,

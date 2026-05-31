@@ -11,10 +11,12 @@ from peft import prepare_model_for_kbit_training
 from transformers import AutoModelForMultimodalLM, AutoProcessor, Trainer, TrainingArguments
 
 from src.models.gemma4_lora import (
+    align_gemma4_multimodal_dtypes,
     apply_gemma4_lora,
     build_gemma4_bnb_config,
     build_gemma4_lora_config,
     patch_clippable_linear_for_peft,
+    patch_masked_scatter_dtype_compat,
 )
 from src.training.collator import GemmaASRCollator
 from src.training.gemma_trainer import GemmaASRTrainer
@@ -75,6 +77,8 @@ def run_train(cli_args) -> None:
     processor = AutoProcessor.from_pretrained(rt.base_model_id, padding_side="left")
 
     use_4bit = not bool(getattr(cli_args, "no_4bit", False))
+    if use_4bit:
+        patch_masked_scatter_dtype_compat()
     if getattr(cli_args, "peft_clippable_patch", False):
         patch_clippable_linear_for_peft()
 
@@ -92,6 +96,7 @@ def run_train(cli_args) -> None:
     model = AutoModelForMultimodalLM.from_pretrained(rt.base_model_id, **load_kw)
     if use_4bit:
         model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+        align_gemma4_multimodal_dtypes(model)
 
     lora_target = getattr(cli_args, "lora_target_modules", None)
     lora = build_gemma4_lora_config(target_modules=lora_target)

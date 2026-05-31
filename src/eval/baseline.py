@@ -21,8 +21,21 @@ from src.utils.paths import (
 from src.utils.runtime import get_runtime
 
 
-def run_baseline(args) -> None:
+def load_baseline_gemma(*, fp16: bool = False):
+    """Load zero-shot Gemma 4 base model for inference (no LoRA adapter)."""
     rt = get_runtime()
+    dtype = torch.float16 if fp16 else torch.bfloat16
+    processor = AutoProcessor.from_pretrained(rt.base_model_id, padding_side="left")
+    model = AutoModelForMultimodalLM.from_pretrained(
+        rt.base_model_id,
+        dtype=dtype,
+        device_map="auto",
+        attn_implementation="sdpa",
+    ).eval()
+    return model, processor
+
+
+def run_baseline(args) -> None:
     normalize = getattr(args, "normalize", TEXT_NORMALIZE_DEFAULT)
     dsd = load_from_disk(str(PREPARED_LOCAL))
     tests = {"domain_test": dsd["test"]}
@@ -33,13 +46,7 @@ def run_baseline(args) -> None:
             raise SystemExit("Retention suite prepared dataset has no 'test' split.")
         tests["retention_test"] = ret_dd["test"]
 
-    processor = AutoProcessor.from_pretrained(rt.base_model_id, padding_side="left")
-    model = AutoModelForMultimodalLM.from_pretrained(
-        rt.base_model_id,
-        dtype=torch.bfloat16,
-        device_map="auto",
-        attn_implementation="sdpa",
-    ).eval()
+    model, processor = load_baseline_gemma(fp16=bool(getattr(args, "fp16", False)))
 
     PREDICTIONS_DIR.mkdir(exist_ok=True, parents=True)
     results = {"normalize": normalize}

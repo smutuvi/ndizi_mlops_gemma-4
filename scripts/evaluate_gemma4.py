@@ -12,11 +12,21 @@ Hub batch eval (ndizi_mlops-style):
     --batch_size 4 \\
     --normalize jiwer_default
 
+Zero-shot base model (E2B) on one audio file:
+
+  python scripts/evaluate_gemma4.py \\
+    --model E2B \\
+    --baseline \\
+    --audio /path/to/clip.wav \\
+    --reference "optional ground truth" \\
+    --output eval/baseline_single.json
+
 Long clips (>30s): omit --chunk_length_s to auto-enable 30s windows, or pass explicitly.
 """
 from __future__ import annotations
 
 import argparse
+import os
 import sys
 from pathlib import Path
 
@@ -30,7 +40,21 @@ from src.utils.paths import CHECKPOINT_DIR  # noqa: E402
 from src.utils.runtime import apply_model_choice  # noqa: E402
 
 
+def load_env_file(env_path: Path) -> None:
+    if not env_path.is_file():
+        return
+    for line in env_path.read_text(encoding="utf-8").splitlines():
+        line = line.strip()
+        if not line or line.startswith("#") or "=" not in line:
+            continue
+        k, v = line.split("=", 1)
+        k, v = k.strip(), v.strip().strip("'").strip('"')
+        if k and k not in os.environ:
+            os.environ[k] = v
+
+
 def main() -> int:
+    load_env_file(ROOT / ".env")
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default="E2B", help="E2B / E4B or full HuggingFace model id")
 
@@ -101,6 +125,11 @@ def main() -> int:
     )
 
     p.add_argument(
+        "--baseline",
+        action="store_true",
+        help="Zero-shot base model (no LoRA checkpoint). Use with --audio for single-file inference.",
+    )
+    p.add_argument(
         "--audio",
         type=str,
         default=None,
@@ -136,6 +165,8 @@ def main() -> int:
     apply_model_choice(args.model)
     if args.audio:
         run_transcribe_file(args)
+    elif args.baseline:
+        raise SystemExit("--baseline requires --audio (single-file zero-shot inference).")
     else:
         run_evaluate(args)
     return 0

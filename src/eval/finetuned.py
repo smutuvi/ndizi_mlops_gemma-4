@@ -102,26 +102,43 @@ def _load_eval_tests(args) -> dict:
 
 
 def run_transcribe_file(args) -> None:
-    """Transcribe one audio file with the finetuned LoRA adapter."""
+    """Transcribe one audio file with a finetuned LoRA adapter or zero-shot base model."""
+    from src.eval.baseline import load_baseline_gemma
+
     audio_path = Path(args.audio).expanduser().resolve()
-    checkpoint = Path(args.checkpoint).expanduser() if args.checkpoint else CHECKPOINT_DIR / "best"
+    baseline = bool(getattr(args, "baseline", False))
     chunk_s = getattr(args, "chunk_length_s", None)
     stride_s = getattr(args, "stride_length_s", None)
+    auto_chunk = not bool(getattr(args, "no_auto_chunk", False))
+    fp16 = bool(getattr(args, "fp16", False))
+    rt = get_runtime()
 
-    print(f"[transcribe] audio      = {audio_path}")
-    print(f"[transcribe] checkpoint = {checkpoint.resolve()}")
+    print(f"[transcribe] audio   = {audio_path}")
+    if baseline:
+        if getattr(args, "checkpoint", None):
+            raise SystemExit("--checkpoint is not used with --baseline (zero-shot base model).")
+        print(f"[transcribe] mode    = baseline (zero-shot)")
+        print(f"[transcribe] model   = {rt.base_model_id}")
+        model, processor = load_baseline_gemma(fp16=fp16)
+        source_id = rt.base_model_id
+    else:
+        checkpoint = Path(args.checkpoint).expanduser() if args.checkpoint else CHECKPOINT_DIR / "best"
+        print(f"[transcribe] mode    = finetuned (LoRA)")
+        print(f"[transcribe] checkpoint = {checkpoint.resolve()}")
+        model, processor, adapter = load_finetuned_gemma(checkpoint, fp16=fp16)
+        source_id = str(adapter.resolve())
+
     if chunk_s:
-        print(f"[transcribe] chunking   = {chunk_s}s stride={stride_s}")
+        print(f"[transcribe] chunking = {chunk_s}s stride={stride_s}")
 
-    model, processor, adapter = load_finetuned_gemma(
-        checkpoint, fp16=bool(getattr(args, "fp16", False))
-    )
     audio = load_audio_file(audio_path)
     if chunk_s is None:
         from src.inference.gemma_inputs import resample_mono_16k
 
         dur = len(resample_mono_16k(audio)) / 16000.0
-        chunk_s = resolve_chunk_length_s(None, max_clip_duration_s=dur, auto_chunk_long=True)
+        chunk_s = resolve_chunk_length_s(
+            None, max_clip_duration_s=dur, auto_chunk_long=auto_chunk
+        )
     predict = make_gemma_predict_fn(
         model, processor, chunk_length_s=chunk_s, stride_length_s=stride_s
     )
@@ -133,11 +150,16 @@ def run_transcribe_file(args) -> None:
 
     result = {
         "audio": str(audio_path),
-        "checkpoint": str(adapter.resolve()),
+        "baseline": baseline,
+        "base_model_id": rt.base_model_id,
         "hypothesis": hyp,
         "chunk_length_s": chunk_s,
         "stride_length_s": stride_s,
     }
+    if baseline:
+        result["checkpoint"] = None
+    else:
+        result["checkpoint"] = source_id
     ref = getattr(args, "reference", None)
     if ref:
         norm = getattr(args, "normalize", TEXT_NORMALIZE_EVAL_DEFAULT)

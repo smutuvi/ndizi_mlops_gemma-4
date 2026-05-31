@@ -75,6 +75,11 @@ def build_parser() -> argparse.ArgumentParser:
     p_train.add_argument("--peft-clippable-patch", action="store_true")
 
     p_eval = sub.add_parser("evaluate", parents=[model_parent], help="Finetuned WER/CER or one file")
+    p_eval.add_argument(
+        "--baseline",
+        action="store_true",
+        help="Zero-shot base model (no LoRA). Use with --audio.",
+    )
     p_eval.add_argument("--audio", default=None, help="Transcribe one audio file")
     p_eval.add_argument("--checkpoint", default=None, help="LoRA adapter dir (default: artifacts/checkpoints/best)")
     p_eval.add_argument("--test-datasets", nargs="+", default=None, dest="test_datasets")

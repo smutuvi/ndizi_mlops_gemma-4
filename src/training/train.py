@@ -1,4 +1,6 @@
 # src/training/train.py — QLoRA fine-tune Gemma 4 for Swahili ASR (adapter-first).
+# Bump when training behavior changes (helps confirm server git pull).
+NDIZI_TRAIN_CODE_VERSION = "4bit-audio-patches-v1"
 from __future__ import annotations
 
 import inspect
@@ -58,6 +60,7 @@ def _strip_label_positions(pred_row, label_row):
 
 
 def run_train(cli_args) -> None:
+    print(f"[train] code version: {NDIZI_TRAIN_CODE_VERSION}")
     rt = get_runtime()
     dsd = load_from_disk(str(PREPARED_LOCAL))
     train_ds = dsd["train"]

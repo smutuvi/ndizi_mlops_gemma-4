@@ -5,7 +5,12 @@ ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
 echo "=== 0) Git: use main with 4-bit train fixes (323f948+) ==="
+git pull origin main
 git log -1 --oneline
+if ! grep -q patch_gemma4_audio_finfo_for_kbit src/training/train.py 2>/dev/null; then
+  echo "ERROR: git pull did not bring 4-bit audio patches. Need main @ 323f948+." >&2
+  exit 1
+fi
 
 echo "=== 1) Optional: back up current checkpoint before overwrite ==="
 if [[ -d artifacts/checkpoints/best ]]; then

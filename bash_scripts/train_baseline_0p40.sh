@@ -6,6 +6,11 @@ set -euo pipefail
 ROOT="$(cd "$(dirname "$0")/.." && pwd)"
 cd "$ROOT"
 
+if ! grep -q patch_gemma4_audio_finfo_for_kbit src/training/train.py 2>/dev/null; then
+  echo "ERROR: stale train.py (missing 4-bit audio patches). Run: git pull origin main" >&2
+  exit 1
+fi
+
 python scripts/train_gemma4.py \
   --model E2B \
   --replay-ratio 0.05 \

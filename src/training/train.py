@@ -86,7 +86,14 @@ def run_train(cli_args) -> None:
     use_4bit = not bool(getattr(cli_args, "no_4bit", False))
     if use_4bit:
         patch_gemma4_masked_scatter_dtype()
-        patch_gemma4_audio_finfo_for_kbit()
+        audio_patched = patch_gemma4_audio_finfo_for_kbit()
+        if not audio_patched:
+            raise SystemExit(
+                "[train] 4-bit QLoRA requires Gemma4 audio finfo patches in src/models/gemma4_lora.py. "
+                "On the server run: cd ~/ndizi_mlops_gemma-4 && git pull origin main "
+                "(need commit 323f948 or later). You should see "
+                "'Patched Gemma4AudioFeedForward...' before model load."
+            )
     if getattr(cli_args, "peft_clippable_patch", False):
         patch_clippable_linear_for_peft()
 

@@ -1,0 +1,76 @@
+{
+  "text_normalize": "jiwer_default",
+  "pooled": {
+    "wer": 0.4427020506634499,
+    "cer": 0.200920245398773,
+    "n_utterances": 16,
+    "wer_normalized": 0.4116222760290557,
+    "cer_normalized": 0.18323547276776675
+  },
+  "per_set": {
+    "smutuvi/ndizi-1:test": {
+      "wer": 0.5271317829457365,
+      "cer": 0.267209668943773,
+      "n": 8,
+      "dropped_long": 0,
+      "chunk_length_s": 30.0,
+      "wer_normalized": 0.5077821011673151,
+      "cer_normalized": 0.25015556938394523
+    },
+    "smutuvi/ndizi-1-2025:test": {
+      "wer": 0.3035143769968051,
+      "cer": 0.07856450048496605,
+      "n": 8,
+      "dropped_long": 0,
+      "chunk_length_s": 30.0,
+      "wer_normalized": 0.2532051282051282,
+      "cer_normalized": 0.058550724637681156
+    }
+  },
+  "splits": {
+    "text_normalize": "jiwer_default",
+    "smutuvi/ndizi-1:test": {
+      "pooled": {
+        "wer": 0.5271317829457365,
+        "cer": 0.267209668943773,
+        "n": 8,
+        "normalize": "none"
+      },
+      "smutuvi/ndizi-1": {
+        "wer": 0.5271317829457365,
+        "cer": 0.267209668943773,
+        "n": 8,
+        "normalize": "none"
+      }
+    },
+    "smutuvi/ndizi-1-2025:test": {
+      "pooled": {
+        "wer": 0.3035143769968051,
+        "cer": 0.07856450048496605,
+        "n": 8,
+        "normalize": "none"
+      },
+      "smutuvi/ndizi-1-2025": {
+        "wer": 0.3035143769968051,
+        "cer": 0.07856450048496605,
+        "n": 8,
+        "normalize": "none"
+      }
+    }
+  },
+  "run_info": {
+    "checkpoint": "/home/smutuvi/ndizi_mlops_gemma-4/artifacts/checkpoints/best",
+    "base_model_id": "google/gemma-4-E2B-it",
+    "test_datasets": [
+      "smutuvi/ndizi-1:test",
+      "smutuvi/ndizi-1-2025:test"
+    ],
+    "output_dir": "/home/smutuvi/ndizi_mlops_gemma-4/eval/gemma4-eval-run-smoke-test/smoke",
+    "batch_size": 4,
+    "chunk_length_s": 30.0,
+    "stride_length_s": null,
+    "max_audio_seconds": null,
+    "fp16": false,
+    "max_samples": 8
+  }
+}

@@ -1,0 +1,1420 @@
+"""
+End-to-end fine-tune of Gemma 4 E2B for Swahili ASR on
+smutuvi/ndizi-1 + smutuvi/ndizi-1-2025.
+
+Single script, phase-by-phase. Run everything with `all`, or run an
+individual phase by name. Phases are idempotent enough that you can
+re-run later phases without redoing earlier ones (artifacts are cached
+to ./artifacts/).
+
+This pipeline defaults to an **adapter-first** workflow (QLoRA/LoRA):
+- publish adapter-only as the primary artifact (lowest risk of forgetting)
+- optionally publish merged weights only after retention checks pass
+
+Examples
+--------
+    python run_pipeline.py all
+    python run_pipeline.py inspect
+    python run_pipeline.py prepare --chunk-long-audio
+    python run_pipeline.py prepare --chunk-long-audio --chunk-test
+    python run_pipeline.py baseline --with-whisper
+    python run_pipeline.py train
+    python run_pipeline.py evaluate
+    python run_pipeline.py publish --adapter-only
+
+Prereqs
+-------
+* GPU (target: 1 x A100 40/80 GB)
+* HF_TOKEN env var with WRITE scope, Gemma 4 license accepted
+* `01_setup.sh` already executed (deps + ffmpeg)
+"""
+
+from __future__ import annotations
+import argparse, json, os, sys, textwrap
+from collections import Counter
+from dataclasses import dataclass
+from pathlib import Path
+from typing import Any
+
+from tqdm.auto import tqdm
+
+# ---------------------------------------------------------------------
+# Configuration
+# ---------------------------------------------------------------------
+BASE_MODEL_ID   = "google/gemma-4-E2B-it"   # default; overridable via --model
+WHISPER_REF_ID  = "openai/whisper-large-v3"
+
+# Short-name -> full HF model id. Add new sizes here.
+MODEL_ALIASES = {
+    "E2B":  "google/gemma-4-E2B-it",
+    "E4B":  "google/gemma-4-E4B-it",
+    "e2b":  "google/gemma-4-E2B-it",
+    "e4b":  "google/gemma-4-E4B-it",
+}
+
+
+def _resolve_model_id(name: str) -> str:
+    """Map short alias (E2B/E4B) to full HF id, or pass through as-is."""
+    return MODEL_ALIASES.get(name, name)
+
+
+def _apply_model_choice(name: str) -> None:
+    """Set BASE_MODEL_ID + OUTPUT_MODEL_REPO from the user's --model choice."""
+    global BASE_MODEL_ID, OUTPUT_MODEL_REPO
+    BASE_MODEL_ID = _resolve_model_id(name)
+    # Tag the output repo with the model size so E2B and E4B runs don't
+    # overwrite each other on the Hub.
+    short = BASE_MODEL_ID.split("/")[-1].replace("-it", "").lower()  # gemma-4-e2b
+    OUTPUT_MODEL_REPO = f"smutuvi/{short}-sw-asr-ndizi"
+    print(f"[config] BASE_MODEL_ID    = {BASE_MODEL_ID}")
+    print(f"[config] OUTPUT_MODEL_REPO = {OUTPUT_MODEL_REPO}")
+SRC_DATASETS    = ["smutuvi/ndizi-1", "smutuvi/ndizi-1-2025"]
+AUDIO_COLUMN    = "audio"
+TEXT_COLUMN     = "text"
+SPEAKER_COLUMN  = "speaker_id"
+PREPARED_REPO   = "smutuvi/ndizi-merged-asr"
+OUTPUT_MODEL_REPO = "smutuvi/gemma-4-e2b-sw-asr-ndizi"
+TARGET_SR       = 16_000
+MAX_AUDIO_SEC   = 30.0
+
+# Recommended ASR prompt from the Gemma 4 model card (Best Practices > Audio).
+ASR_INSTRUCTION = (
+    "Transcribe the following speech segment in Swahili into Swahili text.\n\n"
+    "Follow these specific instructions for formatting the answer:\n"
+    "* Only output the transcription, with no newlines.\n"
+    "* When transcribing numbers, write the digits, i.e. write 1.7 and not "
+    "one point seven, and write 3 instead of three."
+)
+
+WORK_DIR        = Path(__file__).resolve().parent
+ARTIFACTS_DIR   = WORK_DIR / "artifacts";   ARTIFACTS_DIR.mkdir(exist_ok=True)
+PREPARED_LOCAL  = ARTIFACTS_DIR / "prepared_dataset"
+CHECKPOINT_DIR  = ARTIFACTS_DIR / "checkpoints"
+PREDICTIONS_DIR = ARTIFACTS_DIR / "predictions"
+BASELINE_JSON   = ARTIFACTS_DIR / "baseline_results.json"
+FINETUNED_JSON  = ARTIFACTS_DIR / "finetuned_results.json"
+
+# Retention defaults: optional "general Swahili" replay/eval datasets.
+# The caller should pass these explicitly via CLI, because availability and
+# schema vary across Hub datasets.
+RETENTION_PREPARED_LOCAL = ARTIFACTS_DIR / "retention_prepared_dataset"
+
+RETENTION_BASELINE_JSON  = ARTIFACTS_DIR / "retention_baseline_results.json"
+RETENTION_FINETUNED_JSON = ARTIFACTS_DIR / "retention_finetuned_results.json"
+
+
+def _split_spec_list(raw: list[str] | None, *, default_split: str) -> list[tuple[str, str]]:
+    """
+    Parse ["repo", "repo:split"] into [(repo, split)].
+    """
+    out: list[tuple[str, str]] = []
+    for item in raw or []:
+        s = str(item).strip()
+        if not s:
+            continue
+        if ":" in s:
+            did, sp = s.split(":", 1)
+            out.append((did.strip(), sp.strip()))
+        else:
+            out.append((s, default_split))
+    return out
+
+
+def _load_asr_dataset_specs(
+    specs: list[tuple[str, str]],
+    *,
+    suite_label: str,
+    chunk_long_audio: bool,
+    chunk_test: bool,
+):
+    """
+    Load one or more Hub datasets for ASR, standardize audio, optionally chunk long clips,
+    and return a merged DatasetDict with {train, validation, test} if present.
+    """
+    from datasets import Audio, DatasetDict, concatenate_datasets, load_dataset
+
+    prepared: dict[str, DatasetDict] = {}
+    for did, _ in specs:
+        ds = load_dataset(did)
+        ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=TARGET_SR))
+        prepared[did] = ds
+
+    out = DatasetDict()
+    # Determine which splits exist across sources.
+    all_splits: set[str] = set()
+    for ds in prepared.values():
+        all_splits |= set(ds.keys())
+
+    for split in sorted(all_splits):
+        parts = []
+        for did, _ in specs:
+            if split not in prepared[did]:
+                continue
+            part = prepared[did][split].add_column("source_dataset", [did] * len(prepared[did][split]))
+            part = part.add_column("suite", [suite_label] * len(part))
+
+            if chunk_long_audio:
+                if split in ("train", "validation"):
+                    part = _align_and_chunk_long_clips(
+                        part,
+                        add_reassembly=False,
+                        desc=f"MMS-FA chunk {suite_label} {split}",
+                    )
+                elif split == "test" and chunk_test:
+                    part = _align_and_chunk_long_clips(
+                        part,
+                        add_reassembly=True,
+                        desc=f"MMS-FA chunk {suite_label} test",
+                    )
+                elif split == "test":
+                    part = _add_chunk_index_zero(part)
+            parts.append(part)
+        if parts:
+            out[split] = concatenate_datasets(parts)
+    return out
+
+# =====================================================================
+# Phase 1: inspect
+# =====================================================================
+def phase_inspect(_args) -> None:
+    import matplotlib
+    matplotlib.use("Agg")
+    import matplotlib.pyplot as plt
+    import pandas as pd
+    from datasets import load_dataset
+
+    speaker_sets = {}
+    for name in SRC_DATASETS:
+        print(f"\n========== {name} ==========")
+        ds = load_dataset(name)
+        print(ds)
+        first = next(iter(ds.values()))
+        print("columns:", first.column_names)
+
+        durations, speakers = [], []
+        for split_name, split in ds.items():
+            for row in tqdm(split, total=len(split),
+                            desc=f"{name}/{split_name}",
+                            unit="row", dynamic_ncols=True):
+                a = row.get(AUDIO_COLUMN)
+                if a and "array" in a and "sampling_rate" in a:
+                    durations.append(len(a["array"]) / a["sampling_rate"])
+                sp = row.get(SPEAKER_COLUMN)
+                if sp is not None:
+                    speakers.append(sp)
+        speaker_sets[name] = set(speakers)
+
+        if durations:
+            s = pd.Series(durations)
+            print("duration_s describe:")
+            print(s.describe(percentiles=[0.5, 0.9, 0.95, 0.99]))
+            print("clips >30s:", int((s > MAX_AUDIO_SEC).sum()))
+            png = ARTIFACTS_DIR / f"{name.replace('/', '_')}_durations.png"
+            plt.figure(); s.hist(bins=60)
+            plt.axvline(MAX_AUDIO_SEC, color="red", linestyle="--",
+                        label=f"{MAX_AUDIO_SEC:.0f}s limit")
+            plt.xlabel("duration (s)"); plt.ylabel("count")
+            plt.title(f"{name} durations"); plt.legend(); plt.tight_layout()
+            plt.savefig(png); print("wrote", png)
+
+    a, b = SRC_DATASETS
+    if speaker_sets[a] and speaker_sets[b]:
+        overlap = speaker_sets[a] & speaker_sets[b]
+        print(f"\nSpeakers in {a}: {len(speaker_sets[a])}")
+        print(f"Speakers in {b}: {len(speaker_sets[b])}")
+        print(f"Overlap: {len(overlap)} speakers")
+        if overlap:
+            print("WARNING: speaker overlap -- build splits by speaker "
+                  "to avoid leakage.")
+
+
+# =====================================================================
+# Phase 2: prepare
+# =====================================================================
+def _add_chunk_index_zero(ds):
+    """Schema parity: one row per clip, chunk_index always 0."""
+    if "chunk_index" in ds.column_names:
+        return ds
+    return ds.add_column("chunk_index", [0] * len(ds))
+
+
+def _align_and_chunk_long_clips(
+    ds,
+    max_chunk_sec: float = 28.0,
+    model_id: str = "MahmoudAshraf/mms-300m-1130-forced-aligner",
+    *,
+    add_reassembly: bool = False,
+    desc: str = "MMS-FA chunk",
+):
+    """Split clips longer than MAX_AUDIO_SEC into <=max_chunk_sec segments
+    using MMS forced alignment. No external alignment package needed -
+    just transformers + torchaudio.functional.forced_align.
+
+    No rows are dropped: short clips pass through as one chunk each;
+    long clips are emitted as multiple chunks with their corresponding
+    word ranges as text. A `chunk_index` column is added to every row
+    (0 for unchunked clips, 0..N-1 for chunks of long clips).
+
+    When ``add_reassembly`` is True (test split with ``--chunk-test``),
+    also adds ``clip_id``, ``full_text``, and ``num_chunks`` so chunk-level
+    predictions can be stitched back for evaluation on the original ref.
+
+    Requires:
+        torchaudio >= 2.1  (for torchaudio.functional.forced_align)
+        transformers       (already a dependency for Gemma 4)
+    """
+    import re
+    import numpy as np
+    import torch
+    from datasets import Dataset
+
+    try:
+        from torchaudio.functional import forced_align
+    except ImportError as exc:
+        raise RuntimeError(
+            "MMS-FA chunking needs torchaudio.functional.forced_align, "
+            "which was added in torchaudio>=2.1. Upgrade torchaudio or "
+            "skip --chunk-long-audio."
+        ) from exc
+
+    from transformers import AutoProcessor, Wav2Vec2ForCTC
+
+    device = "cuda" if torch.cuda.is_available() else "cpu"
+    print(f"Loading MMS-FA model ({model_id})...")
+    processor = AutoProcessor.from_pretrained(model_id)
+    model = Wav2Vec2ForCTC.from_pretrained(model_id).to(device).eval()
+
+    tok = processor.tokenizer
+    vocab = tok.get_vocab()
+    # CTC blank must match Wav2Vec2ForCTC training (nn.ctc_loss uses config.pad_token_id).
+    _blank = getattr(model.config, "pad_token_id", None)
+    BLANK_ID = (
+        _blank
+        if _blank is not None
+        else (tok.pad_token_id if tok.pad_token_id is not None else 0)
+    )
+    # MMS-FA tokenizer uses "|" as the word separator.
+    SEP = "|" if "|" in vocab else " "
+    SEP_ID = vocab.get(SEP)
+
+    PUNCT_RE = re.compile(r"[^\w\s']", flags=re.UNICODE)
+    WS_RE    = re.compile(r"\s+")
+
+    def _normalise(text: str) -> list[str]:
+        t = PUNCT_RE.sub(" ", text.lower())
+        t = WS_RE.sub(" ", t).strip()
+        return t.split()
+
+    def _encode(words):
+        """Build the target token sequence and per-word index ranges."""
+        tokens, ranges = [], []
+        for i, w in enumerate(words):
+            start = len(tokens)
+            for c in w:
+                if c in vocab:
+                    tokens.append(vocab[c])
+            end = len(tokens)
+            ranges.append((start, end))
+            if i < len(words) - 1 and SEP_ID is not None:
+                tokens.append(SEP_ID)
+        return tokens, ranges
+
+    def _ctc_path_to_token_frame_spans(path, labels, blank_id):
+        """One [start, end) frame span per target label from the forced CTC path.
+
+        ``merge_tokens(..., blank=0)`` defaults are wrong when ``blank_id != 0``,
+        which inflates span counts; decoding with the same ``blank_id`` as
+        ``forced_align`` avoids that.
+        """
+        T = len(path)
+        i = 0
+        spans = []
+        for j, yj in enumerate(labels):
+            while i < T and path[i] == blank_id:
+                i += 1
+            if i >= T:
+                raise ValueError(f"CTC path ended early at label {j}/{len(labels)}")
+            if path[i] != yj:
+                raise ValueError(
+                    f"CTC path mismatch at label {j}: expected {yj}, got {path[i]}"
+                )
+            start = i
+            while i < T and path[i] == yj:
+                i += 1
+            spans.append((start, i))
+        while i < T and path[i] == blank_id:
+            i += 1
+        if i != T:
+            raise ValueError(
+                f"CTC path has non-blank after last label (frame {i}, id={path[i]})"
+            )
+        return spans
+
+    @torch.inference_mode()
+    def _align_word_spans(wav_np, words):
+        wav_t = torch.from_numpy(wav_np).float().unsqueeze(0).to(device)
+        emission = torch.log_softmax(model(wav_t).logits, dim=-1)
+        tokens, ranges = _encode(words)
+        if not tokens:
+            return []
+        targets = torch.tensor([tokens], dtype=torch.int32, device=device)
+        alignments, _scores = forced_align(emission, targets, blank=BLANK_ID)
+        path = alignments[0].flatten().int().cpu().tolist()
+        tok_spans = _ctc_path_to_token_frame_spans(path, tokens, BLANK_ID)
+        T = emission.size(1)
+        sec_per_frame = len(wav_np) / 16_000 / T
+        out = []
+        for (ts, te) in ranges:
+            if te <= ts:
+                continue
+            out.append((tok_spans[ts][0] * sec_per_frame,
+                        tok_spans[te - 1][1] * sec_per_frame))
+        return out
+
+    def _resample_16k(wav, sr):
+        if sr == 16_000:
+            return wav, sr
+        try:
+            import torchaudio.functional as TAF
+            t = torch.from_numpy(wav).float()
+            return TAF.resample(t, sr, 16_000).numpy(), 16_000
+        except Exception:
+            from scipy.signal import resample_poly
+            return resample_poly(wav, 16_000, sr).astype(np.float32), 16_000
+
+    def _reassembly_fields(clip_id, full_text, chunk_index, num_chunks):
+        if not add_reassembly:
+            return {}
+        return {
+            "clip_id": clip_id,
+            "full_text": full_text,
+            "chunk_index": chunk_index,
+            "num_chunks": num_chunks,
+        }
+
+    rows, n_failed, n_chunked = [], 0, 0
+    next_clip_id = 0
+    for row in tqdm(ds, total=len(ds), desc=desc, unit="clip",
+                    dynamic_ncols=True):
+        clip_id = next_clip_id
+        next_clip_id += 1
+        audio = row[AUDIO_COLUMN]
+        wav = np.asarray(audio["array"], dtype=np.float32)
+        sr  = audio["sampling_rate"]
+        dur = len(wav) / sr
+        text = (row.get(TEXT_COLUMN) or "").strip()
+
+        if dur <= MAX_AUDIO_SEC:
+            nr = dict(row)
+            nr["chunk_index"] = 0
+            nr.update(_reassembly_fields(clip_id, text, 0, 1))
+            rows.append(nr)
+            continue
+        if not text:
+            nr = dict(row)
+            nr["chunk_index"] = 0
+            nr.update(_reassembly_fields(clip_id, text, 0, 1))
+            rows.append(nr)
+            continue
+
+        try:
+            wav, sr = _resample_16k(wav, sr)
+            norm_words = _normalise(text)
+            orig_words = text.split()
+            if len(orig_words) != len(norm_words):
+                orig_words = norm_words
+
+            spans = _align_word_spans(wav, norm_words)
+            if not spans:
+                raise ValueError("no words aligned")
+
+            # Greedy packing: extend current chunk until adding the next
+            # word would push duration past max_chunk_sec.
+            chunks = []
+            chunk_start = spans[0][0]
+            cur_idx = []
+            for i, (s, e) in enumerate(spans):
+                if e - chunk_start > max_chunk_sec and cur_idx:
+                    chunks.append(
+                        (chunk_start, spans[cur_idx[-1]][1], cur_idx[:])
+                    )
+                    chunk_start = s
+                    cur_idx = [i]
+                else:
+                    cur_idx.append(i)
+            if cur_idx:
+                chunks.append(
+                    (chunk_start, spans[cur_idx[-1]][1], cur_idx[:])
+                )
+
+            n_chunked += 1
+            n_chunks = len(chunks)
+            for ci, (cs, ce, widx) in enumerate(chunks):
+                ss = max(0, int(cs * sr))
+                se = min(len(wav), int(ce * sr))
+                seg = wav[ss:se]
+                seg_text = " ".join(orig_words[j] for j in widx)
+                nr = dict(row)
+                nr[AUDIO_COLUMN] = {"array": seg, "sampling_rate": sr}
+                nr[TEXT_COLUMN]  = seg_text
+                nr["chunk_index"] = ci
+                nr.update(_reassembly_fields(clip_id, text, ci, n_chunks))
+                rows.append(nr)
+        except Exception as exc:  # noqa: BLE001
+            print(f"  alignment failed for {dur:.1f}s clip "
+                  f"(source={row.get('source_dataset')}): {exc}")
+            n_failed += 1
+            nr = dict(row)
+            nr["chunk_index"] = 0
+            nr.update(_reassembly_fields(clip_id, text, 0, 1))
+            rows.append(nr)
+
+    n_in = len(ds)
+    n_out = len(rows)
+    print(f"  {n_in:,} clip(s) -> {n_out:,} row(s); "
+          f"chunked {n_chunked} long clip(s); {n_failed} alignment failure(s)")
+    if add_reassembly and n_out != n_in:
+        print(f"  (+{n_out - n_in:,} extra rows from splitting; "
+              f"eval should reassemble by clip_id -> full_text)")
+    # HF Arrow rejects mixed float32/float64 across rows (pass-through vs chunked).
+    for r in rows:
+        audio = r.get(AUDIO_COLUMN)
+        if not audio or "array" not in audio:
+            continue
+        r[AUDIO_COLUMN] = {
+            "array": np.asarray(audio["array"], dtype=np.float32),
+            "sampling_rate": audio["sampling_rate"],
+        }
+    return Dataset.from_list(rows)
+
+
+def phase_prepare(args) -> None:
+    import shutil
+    from datasets import Audio, DatasetDict, concatenate_datasets, load_dataset
+
+    if args.chunk_test and not args.chunk_long_audio:
+        raise SystemExit("--chunk-test requires --chunk-long-audio.")
+
+    prepared = {}
+    for name in SRC_DATASETS:
+        print(f"\nPreparing {name}...")
+        ds = load_dataset(name)
+        # Resample audio to 16 kHz mono; this rewrites the audio column
+        # in-place but does NOT drop any rows.
+        ds = ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=TARGET_SR))
+
+        # Report (but do NOT act on) potential issues so you have full
+        # visibility without losing any data.
+        for split_name, split in ds.items():
+            n_total = len(split)
+            n_empty = sum(
+                1 for r in split
+                if not r.get(TEXT_COLUMN) or not str(r[TEXT_COLUMN]).strip()
+            )
+            n_long = sum(
+                1 for r in split
+                if len(r[AUDIO_COLUMN]["array"]) / r[AUDIO_COLUMN]["sampling_rate"]
+                > MAX_AUDIO_SEC
+            )
+            print(f"  {split_name:>10}: {n_total:>7,} rows  "
+                  f"(empty-text: {n_empty}, clips >{MAX_AUDIO_SEC:.0f}s: {n_long})")
+            if n_long and not args.chunk_long_audio:
+                print(f"      WARNING: {n_long} clip(s) exceed Gemma 4's 30s "
+                      "audio limit and will fail at train/eval time. "
+                      "Re-run with --chunk-long-audio to split them losslessly.")
+            if (split_name == "test" and n_long and args.chunk_long_audio
+                    and not args.chunk_test):
+                print(f"      WARNING: {n_long} test clip(s) >{MAX_AUDIO_SEC:.0f}s "
+                      "left unchunked; add --chunk-test to split with "
+                      "reassembly metadata, or they may fail at eval time.")
+
+        # MMS-FA chunking: train + validation when --chunk-long-audio;
+        # test only when --chunk-test (with reassembly cols for eval stitch).
+        if args.chunk_long_audio:
+            chunked = {}
+            for split_name, split in ds.items():
+                if split_name in ("train", "validation"):
+                    chunked[split_name] = _align_and_chunk_long_clips(
+                        split, add_reassembly=False,
+                        desc=f"MMS-FA chunk {split_name}",
+                    )
+                elif split_name == "test" and args.chunk_test:
+                    chunked[split_name] = _align_and_chunk_long_clips(
+                        split, add_reassembly=True,
+                        desc="MMS-FA chunk test",
+                    )
+                elif split_name == "test":
+                    chunked[split_name] = _add_chunk_index_zero(split)
+                else:
+                    chunked[split_name] = split
+            ds = DatasetDict(chunked)
+
+        prepared[name] = ds
+
+    # Concatenate each standard split across both source datasets so the
+    # output is the canonical {train, validation, test} structure. Each
+    # example is tagged with its source dataset so downstream evaluation
+    # can report pooled and per-source metrics.
+    out = DatasetDict()
+    for split in ("train", "validation", "test"):
+        parts = []
+        for n in SRC_DATASETS:
+            if split in prepared[n]:
+                tagged = prepared[n][split].add_column(
+                    "source_dataset", [n] * len(prepared[n][split])
+                )
+                parts.append(tagged)
+        if parts:
+            out[split] = concatenate_datasets(parts)
+        else:
+            print(f"  (no '{split}' split in either source dataset)")
+
+    print("\nFinal prepared dataset:")
+    for k, v in out.items():
+        n_rows = len(v)
+        line = f"  {k}: {n_rows:,} rows"
+        if k == "test" and "clip_id" in v.column_names:
+            n_clips = len(set(v["clip_id"]))
+            line += f"  ({n_clips:,} original clips"
+            if n_rows != n_clips:
+                line += f"; +{n_rows - n_clips:,} rows from --chunk-test)"
+            else:
+                line += ")"
+        print(line)
+        if "source_dataset" in v.column_names:
+            counts = Counter(v["source_dataset"])
+            clips_by_src: dict[str, set] = {}
+            if "clip_id" in v.column_names:
+                for row in v:
+                    clips_by_src.setdefault(row["source_dataset"], set()).add(
+                        row["clip_id"]
+                    )
+            for src in sorted(counts):
+                detail = f"      {src}: {counts[src]:,} rows"
+                if src in clips_by_src:
+                    n_clips = len(clips_by_src[src])
+                    detail += f" ({n_clips:,} clips"
+                    if counts[src] != n_clips:
+                        detail += f"; +{counts[src] - n_clips:,} from chunking"
+                    detail += ")"
+                print(detail)
+
+    # Wipe any stale on-disk dataset (orphan split shards from earlier
+    # runs would otherwise linger alongside the new dataset_dict.json).
+    if PREPARED_LOCAL.exists():
+        shutil.rmtree(PREPARED_LOCAL)
+    out.save_to_disk(str(PREPARED_LOCAL))
+    print("Saved to", PREPARED_LOCAL)
+
+    if args.push:
+        # push_to_hub doesn't delete old splits, so wipe the repo first
+        # to avoid leaving behind stale validation_ndizi_1 etc.
+        from huggingface_hub import HfApi
+        api = HfApi()
+        try:
+            api.delete_repo(repo_id=PREPARED_REPO, repo_type="dataset",
+                            missing_ok=True)
+        except Exception as e:
+            print(f"  (could not delete existing repo: {e})")
+        api.create_repo(repo_id=PREPARED_REPO, repo_type="dataset",
+                        private=True, exist_ok=True)
+        out.push_to_hub(PREPARED_REPO, private=True)
+        print("Pushed to", PREPARED_REPO)
+
+    # Optional: also prepare a retention dataset suite (general Swahili) for
+    # replay-mix training and/or retention evaluation.
+    retention_specs = _split_spec_list(getattr(args, "retention_datasets", None), default_split="train")
+    if retention_specs:
+        # Match the domain chunking flags so retention runs don't crash on >30s clips.
+        print("\nPreparing retention datasets...")
+        ret_dd = _load_asr_dataset_specs(
+            retention_specs,
+            suite_label="retention",
+            chunk_long_audio=bool(args.chunk_long_audio),
+            chunk_test=bool(getattr(args, "retention_chunk_test", False)),
+        )
+        if RETENTION_PREPARED_LOCAL.exists():
+            shutil.rmtree(RETENTION_PREPARED_LOCAL)
+        ret_dd.save_to_disk(str(RETENTION_PREPARED_LOCAL))
+        print("Saved retention suite to", RETENTION_PREPARED_LOCAL)
+
+
+# =====================================================================
+# Shared: Gemma inference helper
+# =====================================================================
+def _prepare_audio_for_gemma(audio):
+    """Mono float32 16 kHz waveform, capped at Gemma's 30 s limit.
+
+    Ensures ``load_audio`` / ``_compute_audio_num_tokens`` / the feature
+    extractor all see the same samples (fixes token vs feature mismatch).
+    """
+    import numpy as np
+
+    arr = audio["array"] if isinstance(audio, dict) else audio
+    wav = np.asarray(arr, dtype=np.float32)
+    if wav.ndim > 1:
+        # HF audio is usually (samples,) or (samples, channels).
+        if wav.shape[0] <= 8 and wav.shape[0] < wav.shape[-1]:
+            wav = wav.mean(axis=0)
+        else:
+            wav = wav.mean(axis=-1)
+    wav = np.ascontiguousarray(wav.squeeze())
+    sr = int(
+        audio.get("sampling_rate", TARGET_SR)
+        if isinstance(audio, dict) else TARGET_SR
+    )
+    if sr != TARGET_SR:
+        try:
+            import torch
+            import torchaudio.functional as TAF
+            wav = TAF.resample(
+                torch.from_numpy(wav), sr, TARGET_SR
+            ).numpy().astype(np.float32)
+        except Exception:
+            from scipy.signal import resample_poly
+            wav = resample_poly(wav, TARGET_SR, sr).astype(np.float32)
+    max_samples = int(MAX_AUDIO_SEC * TARGET_SR)
+    if len(wav) > max_samples:
+        wav = wav[:max_samples]
+    return wav
+
+
+def _gemma_soft_token_count(processor, fe_out) -> int:
+    """Soft-token count from mel frames (matches the audio encoder output)."""
+    import numpy as np
+
+    mask = fe_out["input_features_mask"][0]
+    if hasattr(mask, "numpy"):
+        mask = mask.numpy()
+    num_mel = int(np.asarray(mask, dtype=bool).sum())
+    if num_mel <= 0:
+        return 0
+    t = num_mel
+    for _ in range(2):
+        t = (t + 2 - 3) // 2 + 1
+    return min(t, processor.audio_seq_length)
+
+
+def _gemma_build_inputs(
+    processor,
+    wave,
+    instruction=ASR_INSTRUCTION,
+    *,
+    add_generation_prompt: bool = True,
+    assistant_text: str | None = None,
+):
+    """Build model inputs with audio-token count tied to the feature extractor.
+
+    ``apply_chat_template(..., tokenize=True)`` expands placeholders from
+    raw waveform length, which can disagree with the mel/encoder path and
+    trigger ``Audio features and audio tokens do not match``.
+    """
+    fe_out = processor.feature_extractor([wave], return_tensors="pt")
+    n_soft = _gemma_soft_token_count(processor, fe_out)
+    boa, at, eoa = processor.boa_token, processor.audio_token, processor.eoa_token
+    audio_block = f"{boa}{at * n_soft}{eoa}"
+
+    user_content = [
+        {"type": "audio", "audio": wave},
+        {"type": "text", "text": instruction},
+    ]
+    messages = [{"role": "user", "content": user_content}]
+    if assistant_text is not None:
+        messages.append({"role": "assistant", "content": assistant_text})
+        add_generation_prompt = False
+
+    prompt = processor.apply_chat_template(
+        messages, tokenize=False, add_generation_prompt=add_generation_prompt,
+    )
+    if isinstance(prompt, list):
+        prompt = prompt[0]
+    if at not in prompt:
+        raise ValueError("Gemma chat template missing audio placeholder token")
+    prompt = prompt.replace(at, audio_block, 1)
+
+    inputs = processor(
+        text=prompt,
+        return_tensors="pt",
+        return_mm_token_type_ids=True,
+    )
+    inputs["input_features"] = fe_out["input_features"]
+    inputs["input_features_mask"] = fe_out["input_features_mask"]
+
+    n_ids = int((inputs["input_ids"] == processor.audio_token_id).sum())
+    if n_ids != n_soft:
+        raise ValueError(
+            f"audio placeholder mismatch after build: {n_ids} input_ids vs "
+            f"{n_soft} encoder soft tokens"
+        )
+    return inputs
+
+
+def _gemma_inputs_to_device(inputs, model):
+    """Move processor outputs to the model device.
+
+    Keep ``input_features`` in float32 (Gemma audio tower expects this).
+    Only cast other floating tensors (e.g. pixel) to the model dtype.
+    """
+    import torch
+
+    inputs = inputs.to(model.device)
+    for key, val in inputs.items():
+        if key == "input_features" or key == "input_features_mask":
+            continue
+        if isinstance(val, torch.Tensor) and val.is_floating_point():
+            inputs[key] = val.to(dtype=model.dtype)
+    return inputs
+
+
+def _gemma_transcribe(model, processor, audios, instruction=ASR_INSTRUCTION):
+    """Transcribe a list of audio dicts one at a time (batch size 1 for audio)."""
+    import torch
+
+    results = []
+    for a in audios:
+        wave = _prepare_audio_for_gemma(a)
+        inputs = _gemma_build_inputs(
+            processor, wave, instruction, add_generation_prompt=True,
+        )
+        inputs = _gemma_inputs_to_device(inputs, model)
+        with torch.no_grad():
+            out = model.generate(**inputs, max_new_tokens=256, do_sample=False)
+        new_tokens = out[:, inputs["input_ids"].shape[-1]:]
+        results.append(
+            processor.batch_decode(new_tokens, skip_special_tokens=True)[0]
+        )
+    return results
+
+
+def _eval_with(predict_fn, ds, batch_size=4, group_col="source_dataset",
+               desc="evaluating"):
+    """Run predict_fn over the dataset and return refs, hyps, and the
+    per-row group key (e.g. source_dataset). The group list is empty
+    when the column is absent."""
+    refs, hyps, groups, buf = [], [], [], []
+    has_group = group_col in ds.column_names
+    pbar = tqdm(total=len(ds), desc=desc, unit="clip", dynamic_ncols=True)
+    for row in ds:
+        buf.append(row)
+        if len(buf) == batch_size:
+            refs += [r[TEXT_COLUMN] for r in buf]
+            hyps += predict_fn([r[AUDIO_COLUMN] for r in buf])
+            if has_group:
+                groups += [r[group_col] for r in buf]
+            pbar.update(len(buf))
+            buf = []
+    if buf:
+        refs += [r[TEXT_COLUMN] for r in buf]
+        hyps += predict_fn([r[AUDIO_COLUMN] for r in buf])
+        if has_group:
+            groups += [r[group_col] for r in buf]
+        pbar.update(len(buf))
+    pbar.close()
+    return refs, hyps, groups
+
+
+def _score_grouped(refs, hyps, groups):
+    """Compute WER/CER for the whole pool and for each group value.
+
+    Returns a dict shaped like:
+        {"pooled": {"wer": ..., "cer": ..., "n": ...},
+         "<group_name>": {"wer": ..., "cer": ..., "n": ...},
+         ...}
+    """
+    from jiwer import wer, cer
+    out = {"pooled": {"wer": wer(refs, hyps),
+                      "cer": cer(refs, hyps),
+                      "n":   len(refs)}}
+    if groups:
+        for g in sorted(set(groups)):
+            gr = [r for r, gv in zip(refs, groups) if gv == g]
+            gh = [h for h, gv in zip(hyps, groups) if gv == g]
+            if gr:  # skip empty groups
+                out[g] = {"wer": wer(gr, gh), "cer": cer(gr, gh), "n": len(gr)}
+    return out
+
+
+def _print_grouped(label, scores):
+    print(f"\n[{label}]")
+    for g, m in scores.items():
+        print(f"  {g:>30}  WER={m['wer']:.3f}  CER={m['cer']:.3f}  n={m['n']}")
+
+
+# =====================================================================
+# Phase 3: baseline
+# =====================================================================
+def phase_baseline(args) -> None:
+    import torch
+    from datasets import load_from_disk
+    from transformers import AutoModelForMultimodalLM, AutoProcessor
+
+    dsd = load_from_disk(str(PREPARED_LOCAL))
+    tests = {"domain_test": dsd["test"]}
+
+    # Optional retention eval suite.
+    retention_results = None
+    if getattr(args, "retention_eval", None):
+        from datasets import load_from_disk as _lfd
+        ret_dd = _lfd(str(RETENTION_PREPARED_LOCAL))
+        if "test" not in ret_dd:
+            raise SystemExit("Retention suite prepared dataset has no 'test' split.")
+        tests["retention_test"] = ret_dd["test"]
+
+    processor = AutoProcessor.from_pretrained(BASE_MODEL_ID, padding_side="left")
+    model = AutoModelForMultimodalLM.from_pretrained(
+        BASE_MODEL_ID, dtype=torch.bfloat16, device_map="auto",
+        attn_implementation="sdpa",
+    ).eval()
+
+    PREDICTIONS_DIR.mkdir(exist_ok=True, parents=True)
+    results = {}
+    for name, split in tests.items():
+        print(f"\n[gemma4 zero-shot] {name} ({len(split)} rows)")
+        refs, hyps, groups = _eval_with(
+            lambda a: _gemma_transcribe(model, processor, a),
+            split, args.batch_size,
+            desc=f"gemma4 zero-shot {name}",
+        )
+        scores = _score_grouped(refs, hyps, groups)
+        results[f"gemma4_{name}"] = scores
+        with open(PREDICTIONS_DIR / f"baseline_gemma_{name}.jsonl", "w") as f:
+            for r, h, g in zip(refs, hyps, groups or [None] * len(refs)):
+                f.write(json.dumps(
+                    {"ref": r, "hyp": h, "source_dataset": g},
+                    ensure_ascii=False,
+                ) + "\n")
+        _print_grouped(f"gemma4 zero-shot {name}", scores)
+
+    if args.with_whisper:
+        from transformers import pipeline
+        asr = pipeline("automatic-speech-recognition", model=WHISPER_REF_ID,
+                       torch_dtype=torch.float16, device_map="auto")
+
+        def whisper_predict(audios):
+            return [asr({"array": a["array"], "sampling_rate": TARGET_SR},
+                        generate_kwargs={"language": "swahili",
+                                         "task": "transcribe"})["text"]
+                    for a in audios]
+        for name, split in tests.items():
+            print(f"\n[whisper] {name}")
+            refs, hyps, groups = _eval_with(
+                whisper_predict, split, args.batch_size,
+                desc=f"whisper {name}",
+            )
+            scores = _score_grouped(refs, hyps, groups)
+            results[f"whisper_{name}"] = scores
+            _print_grouped(f"whisper {name}", scores)
+
+    BASELINE_JSON.write_text(json.dumps(results, indent=2))
+    print("\nWrote", BASELINE_JSON)
+
+    if "retention_test" in tests:
+        # Keep a separate file so merge gating can be strict (retention must exist).
+        retention_results = {"gemma4_retention_test": results.get("gemma4_retention_test")}
+        RETENTION_BASELINE_JSON.write_text(json.dumps(retention_results, indent=2))
+        print("Wrote", RETENTION_BASELINE_JSON)
+
+
+# =====================================================================
+# Phase 4: train
+# =====================================================================
+def _maybe_load_retention_replay_train(args):
+    """
+    Load a retention training split for replay mixing (optional).
+
+    This keeps base Swahili capability by mixing in a small amount of general-domain
+    Swahili audio+text while training on the Ndizi domain datasets.
+    """
+    replay_ratio = float(getattr(args, "replay_ratio", 0.0) or 0.0)
+    if replay_ratio <= 0:
+        return None, 0.0
+    specs = _split_spec_list(getattr(args, "retention_datasets", None), default_split="train")
+    if not specs:
+        return None, 0.0
+    from datasets import load_from_disk
+    if not RETENTION_PREPARED_LOCAL.exists():
+        raise SystemExit(
+            "Retention suite not prepared. Run: python run_pipeline.py prepare --retention-datasets ... "
+            "(or set replay_ratio=0 to disable)."
+        )
+    ret = load_from_disk(str(RETENTION_PREPARED_LOCAL))
+    if "train" not in ret:
+        raise SystemExit("Retention suite has no 'train' split.")
+    return ret["train"], replay_ratio
+
+
+def phase_train(args) -> None:
+    import torch
+    from datasets import load_from_disk
+    from jiwer import wer
+    from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training
+    from transformers import (AutoModelForMultimodalLM, AutoProcessor,
+                              BitsAndBytesConfig, Trainer, TrainingArguments)
+
+    dsd = load_from_disk(str(PREPARED_LOCAL))
+    train_ds = dsd["train"]
+    eval_ds  = dsd["validation"].select(range(min(500, len(dsd["validation"]))))
+
+    # Optional replay mix to reduce catastrophic forgetting.
+    retention_train, replay_ratio = _maybe_load_retention_replay_train(args)
+    if retention_train is not None and replay_ratio > 0:
+        from datasets import interleave_datasets
+        # Probabilities: p(domain)=1-r, p(retention)=r
+        p_ret = min(max(replay_ratio, 0.0), 0.5)  # guard: don't drown domain training
+        p_dom = 1.0 - p_ret
+        print(f"[train] replay mix enabled: retention_ratio={p_ret:.3f} (domain={p_dom:.3f})")
+        train_ds = interleave_datasets([train_ds, retention_train], probabilities=[p_dom, p_ret], seed=42)
+
+    processor = AutoProcessor.from_pretrained(BASE_MODEL_ID, padding_side="left")
+
+    bnb = BitsAndBytesConfig(
+        load_in_4bit=True, bnb_4bit_quant_type="nf4",
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_compute_dtype=torch.bfloat16,
+    )
+    model = AutoModelForMultimodalLM.from_pretrained(
+        BASE_MODEL_ID, quantization_config=bnb,
+        dtype=torch.bfloat16, device_map="auto",
+        attn_implementation="sdpa",
+    )
+    model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
+
+    lora = LoraConfig(
+        r=32, lora_alpha=64, lora_dropout=0.05, bias="none",
+        target_modules=["q_proj", "k_proj", "v_proj", "o_proj",
+                        "gate_proj", "up_proj", "down_proj"],
+        modules_to_save=["audio_projector", "multi_modal_projector"],
+        task_type="CAUSAL_LM",
+    )
+    model = get_peft_model(model, lora)
+    model.print_trainable_parameters()
+
+    @dataclass
+    class Collator:
+        """Per-example collator.
+
+        Gemma 4's audio-token / audio-feature accounting only matches when
+        a single audio is processed at a time (see _gemma_transcribe for
+        the underlying cause). We therefore set per_device_train_batch_size
+        to 1 and gradient_accumulation_steps high; this collator simply
+        receives a 1-element batch and prepares it.
+        """
+        proc: Any
+        def __call__(self, batch):
+            assert len(batch) == 1, (
+                "Set per_device_train_batch_size=1 for Gemma 4 audio; "
+                "batched audio triggers a token/feature mismatch."
+            )
+            ex = batch[0]
+            target = ex[TEXT_COLUMN]
+            wave = _prepare_audio_for_gemma(ex[AUDIO_COLUMN])
+            inputs = _gemma_build_inputs(
+                self.proc, wave, ASR_INSTRUCTION,
+                add_generation_prompt=False, assistant_text=target,
+            )
+            labels = inputs["input_ids"].clone()
+            tids = self.proc.tokenizer(target, add_special_tokens=False)["input_ids"]
+            cut = inputs["input_ids"].shape[1] - len(tids)
+            labels[0, :cut] = -100
+            labels[labels == self.proc.tokenizer.pad_token_id] = -100
+            inputs["labels"] = labels
+            return inputs
+
+    def compute_metrics(eval_pred):
+        preds, labels = eval_pred
+        preds  = [[t for t in row if t != -100] for row in preds]
+        labels = [[t for t in row if t != -100] for row in labels]
+        return {"wer": wer(processor.batch_decode(labels, skip_special_tokens=True),
+                            processor.batch_decode(preds,  skip_special_tokens=True))}
+
+    args = TrainingArguments(
+        output_dir=str(CHECKPOINT_DIR),
+        per_device_train_batch_size=1,        # Gemma 4 audio: must be 1
+        gradient_accumulation_steps=int(getattr(args, "grad_accum", 16)),
+        per_device_eval_batch_size=1,         # Gemma 4 audio: must be 1
+        num_train_epochs=float(getattr(args, "epochs", 2.0)),
+        learning_rate=float(getattr(args, "lr", 2e-4)),
+        lr_scheduler_type=str(getattr(args, "lr_scheduler", "cosine")),
+        warmup_ratio=float(getattr(args, "warmup_ratio", 0.03)),
+        bf16=True,
+        gradient_checkpointing=True,
+        gradient_checkpointing_kwargs={"use_reentrant": False},
+        logging_steps=25,
+        eval_strategy="steps", eval_steps=int(getattr(args, "eval_steps", 500)),
+        save_steps=int(getattr(args, "save_steps", 500)), save_total_limit=int(getattr(args, "save_total_limit", 3)),
+        load_best_model_at_end=True,
+        metric_for_best_model="wer", greater_is_better=False,
+        predict_with_generate=True, generation_max_length=256,
+        report_to=["wandb"] if os.environ.get("WANDB_API_KEY") else [],
+        dataloader_num_workers=2, remove_unused_columns=False,
+    )
+
+    trainer = Trainer(
+        model=model, args=args,
+        train_dataset=train_ds, eval_dataset=eval_ds,
+        data_collator=Collator(processor),
+        compute_metrics=compute_metrics, tokenizer=processor,
+    )
+    trainer.train()
+    trainer.save_model(str(CHECKPOINT_DIR / "best"))
+    processor.save_pretrained(str(CHECKPOINT_DIR / "best"))
+    print("Saved LoRA adapter to", CHECKPOINT_DIR / "best")
+
+
+# =====================================================================
+# Phase 5: evaluate
+# =====================================================================
+def phase_evaluate(_args) -> None:
+    import torch
+    from datasets import load_from_disk
+    from peft import PeftModel
+    from transformers import AutoModelForMultimodalLM, AutoProcessor
+
+    processor = AutoProcessor.from_pretrained(BASE_MODEL_ID, padding_side="left")
+    base = AutoModelForMultimodalLM.from_pretrained(
+        BASE_MODEL_ID, dtype=torch.bfloat16, device_map="auto",
+        attn_implementation="sdpa",
+    )
+    model = PeftModel.from_pretrained(base, str(CHECKPOINT_DIR / "best")).eval()
+
+    dsd = load_from_disk(str(PREPARED_LOCAL))
+    tests = {"domain_test": dsd["test"]}
+
+    # Optional retention eval suite.
+    if RETENTION_PREPARED_LOCAL.exists():
+        try:
+            from datasets import load_from_disk as _lfd
+            ret_dd = _lfd(str(RETENTION_PREPARED_LOCAL))
+            if "test" in ret_dd:
+                tests["retention_test"] = ret_dd["test"]
+        except Exception:
+            pass
+
+    PREDICTIONS_DIR.mkdir(exist_ok=True, parents=True)
+    results = {}
+    for name, split in tests.items():
+        print(f"\n[finetuned] {name} ({len(split)} rows)")
+        refs, hyps, groups = _eval_with(
+            lambda a: _gemma_transcribe(model, processor, a),
+            split, batch_size=4,
+            desc=f"finetuned {name}",
+        )
+        scores = _score_grouped(refs, hyps, groups)
+        results[name] = scores
+        with open(PREDICTIONS_DIR / f"finetuned_{name}.jsonl", "w") as f:
+            for r, h, g in zip(refs, hyps, groups or [None] * len(refs)):
+                f.write(json.dumps(
+                    {"ref": r, "hyp": h, "source_dataset": g},
+                    ensure_ascii=False,
+                ) + "\n")
+        _print_grouped(f"finetuned {name}", scores)
+
+    FINETUNED_JSON.write_text(json.dumps(results, indent=2))
+    print("\nWrote", FINETUNED_JSON)
+
+    if "retention_test" in tests:
+        retention_results = {"retention_test": results.get("retention_test")}
+        RETENTION_FINETUNED_JSON.write_text(json.dumps(retention_results, indent=2))
+        print("Wrote", RETENTION_FINETUNED_JSON)
+
+
+# =====================================================================
+# Phase 6: publish
+# =====================================================================
+def phase_publish(args) -> None:
+    import torch
+    from huggingface_hub import HfApi
+    from peft import PeftModel
+    from transformers import AutoModelForMultimodalLM, AutoProcessor
+
+    api = HfApi()
+    api.create_repo(OUTPUT_MODEL_REPO, repo_type="model",
+                    private=False, exist_ok=True)
+
+    processor = AutoProcessor.from_pretrained(BASE_MODEL_ID)
+
+    def _load_retention_scores() -> tuple[dict[str, Any] | None, dict[str, Any] | None]:
+        if not (RETENTION_BASELINE_JSON.exists() and RETENTION_FINETUNED_JSON.exists()):
+            return None, None
+        try:
+            b = json.loads(RETENTION_BASELINE_JSON.read_text())
+            f = json.loads(RETENTION_FINETUNED_JSON.read_text())
+            return b, f
+        except Exception:
+            return None, None
+
+    def _retention_ok(max_wer_delta: float) -> tuple[bool, str]:
+        """
+        Gate merged publication on retention regression.
+        """
+        base_d, ft_d = _load_retention_scores()
+        if base_d is None or ft_d is None:
+            return False, "Missing retention baseline/finetuned scores (run baseline + evaluate with retention suite)."
+        # Expect pooled WER under keys ["gemma4_retention_test"]["pooled"]["wer"] etc.
+        try:
+            b = base_d.get("gemma4_retention_test", {}).get("pooled", {}).get("wer")
+            t = ft_d.get("retention_test", {}).get("pooled", {}).get("wer")
+            if b is None or t is None:
+                return False, "Retention scores missing pooled WER."
+            delta = float(t) - float(b)
+            if delta <= float(max_wer_delta):
+                return True, f"Retention gate pass: baseline WER={b:.4f}, tuned WER={t:.4f}, delta={delta:.4f} <= {max_wer_delta:.4f}"
+            return False, f"Retention gate FAIL: baseline WER={b:.4f}, tuned WER={t:.4f}, delta={delta:.4f} > {max_wer_delta:.4f}"
+        except Exception as e:
+            return False, f"Retention gate error: {e}"
+
+    def wer_table() -> str:
+        if not (BASELINE_JSON.exists() and FINETUNED_JSON.exists()):
+            return "_(WER table unavailable; run baseline and evaluate first.)_"
+        base_d = json.loads(BASELINE_JSON.read_text())
+        ft_d   = json.loads(FINETUNED_JSON.read_text())
+        rows = ["| split | group | base WER | tuned WER | base CER | tuned CER | n |",
+                "|---|---|---|---|---|---|---|"]
+        for split in sorted(ft_d):
+            base_groups = base_d.get(f"gemma4_{split}", {})
+            tuned_groups = ft_d[split]
+            # Render pooled first, then each source dataset.
+            for group in sorted(tuned_groups, key=lambda x: (x != "pooled", x)):
+                b = base_groups.get(group, {})
+                t = tuned_groups[group]
+                rows.append(
+                    f"| {split} | {group} | "
+                    f"{b.get('wer', float('nan')):.3f} | {t['wer']:.3f} | "
+                    f"{b.get('cer', float('nan')):.3f} | {t['cer']:.3f} | "
+                    f"{t['n']} |"
+                )
+        return "\n".join(rows)
+
+    card = textwrap.dedent(f"""
+    ---
+    base_model: {BASE_MODEL_ID}
+    library_name: peft
+    license: gemma
+    language: [sw]
+    tags: [automatic-speech-recognition, swahili, gemma-4, lora]
+    datasets: [{SRC_DATASETS[0]}, {SRC_DATASETS[1]}]
+    ---
+
+    # Gemma 4 E2B - Swahili ASR (ndizi)
+
+    LoRA fine-tune of `{BASE_MODEL_ID}` for Swahili ASR on
+    `{SRC_DATASETS[0]}` + `{SRC_DATASETS[1]}` (concatenated).
+
+    ## Evaluation
+    {wer_table()}
+
+    ## Training
+    QLoRA (4-bit nf4, bf16 compute), rank 32 alpha 64, target modules
+    q/k/v/o + MLPs, audio projector unfrozen, lr 2e-4 cosine + 3% warmup,
+    2 epochs on a single A100, grad accumulation 16.
+    """).strip()
+
+    if args.merged:
+        max_delta = float(getattr(args, "max_retention_wer_delta", 0.02))
+        ok, msg = _retention_ok(max_delta)
+        print("[publish] retention check:", msg)
+        if not ok and not bool(getattr(args, "force_merged", False)):
+            raise SystemExit(
+                "Refusing to publish merged weights due to retention gate failure. "
+                "Re-run with better hyperparams / more replay, or pass --force-merged to override."
+            )
+        base = AutoModelForMultimodalLM.from_pretrained(
+            BASE_MODEL_ID, dtype=torch.bfloat16, device_map="cpu",
+        )
+        merged = PeftModel.from_pretrained(base, str(CHECKPOINT_DIR / "best"))
+        merged = merged.merge_and_unload()
+        out = ARTIFACTS_DIR / "merged"
+        merged.save_pretrained(str(out), safe_serialization=True)
+        processor.save_pretrained(str(out))
+        (out / "README.md").write_text(card)
+        api.upload_folder(repo_id=OUTPUT_MODEL_REPO,
+                          folder_path=str(out), repo_type="model")
+    else:
+        adapter_dir = CHECKPOINT_DIR / "best"
+        (adapter_dir / "README.md").write_text(card)
+        api.upload_folder(repo_id=OUTPUT_MODEL_REPO,
+                          folder_path=str(adapter_dir), repo_type="model")
+    print(f"Published to https://huggingface.co/{OUTPUT_MODEL_REPO}")
+
+
+# =====================================================================
+# CLI
+# =====================================================================
+def main() -> int:
+    ap = argparse.ArgumentParser(formatter_class=argparse.RawDescriptionHelpFormatter,
+                                 description=__doc__)
+
+    # Shared parent parser: --model is available on every subcommand that
+    # actually loads a model (baseline / train / evaluate / publish / all).
+    model_parent = argparse.ArgumentParser(add_help=False)
+    model_parent.add_argument(
+        "--model", default="E2B",
+        help=("Gemma 4 model variant. Accepts E2B, E4B (resolved to the "
+              "matching google/gemma-4-* -it checkpoint), or a full HF "
+              "model id. Default: E2B."),
+    )
+
+    sub = ap.add_subparsers(dest="cmd", required=True)
+
+    sub.add_parser("inspect", help="Phase 1: schema + duration + speaker overlap")
+
+    p_prep = sub.add_parser("prepare", help="Phase 2: standardise + merge")
+    p_prep.add_argument("--push", action="store_true",
+                        help="Also push prepared dataset to the Hub.")
+    p_prep.add_argument(
+        "--retention-datasets",
+        nargs="+",
+        default=[],
+        help=(
+            "Optional retention datasets for anti-forgetting replay/eval. "
+            "Format: repo or repo:split (split applies for prepare only). "
+            "These will be prepared and saved to artifacts/retention_prepared_dataset."
+        ),
+    )
+    p_prep.add_argument(
+        "--retention-chunk-test",
+        action="store_true",
+        help="If --chunk-long-audio is set, also chunk retention test split (adds reassembly metadata).",
+    )
+    p_prep.add_argument(
+        "--chunk-long-audio", action="store_true",
+        help=("MMS-FA chunk train and validation only (clips >30s -> <=28s). "
+              "Test is unchanged except chunk_index=0 unless --chunk-test is "
+              "also set. Requires torchaudio>=2.1."),
+    )
+    p_prep.add_argument(
+        "--chunk-test", action="store_true",
+        help=("With --chunk-long-audio, also MMS-FA chunk the test split and "
+              "add clip_id, full_text, num_chunks for reassembly at eval. "
+              "Without this flag, test rows are not chunked."),
+    )
+
+    p_base = sub.add_parser("baseline", parents=[model_parent],
+                            help="Phase 3: zero-shot WER/CER")
+    p_base.add_argument("--with-whisper", action="store_true")
+    p_base.add_argument("--batch-size", type=int, default=4)
+    p_base.add_argument(
+        "--retention-eval",
+        action="store_true",
+        help="Also evaluate retention suite test split (requires prepare --retention-datasets).",
+    )
+
+    p_train = sub.add_parser("train", parents=[model_parent],
+                             help="Phase 4: QLoRA fine-tune (adapter-first)")
+    p_train.add_argument(
+        "--retention-datasets",
+        nargs="+",
+        default=[],
+        help="Same as prepare --retention-datasets; used here for replay mixing if --replay-ratio > 0.",
+    )
+    p_train.add_argument(
+        "--replay-ratio",
+        type=float,
+        default=0.0,
+        help="Fraction of retention samples mixed into training (0 disables; recommended 0.02-0.10).",
+    )
+    p_train.add_argument("--lr", type=float, default=2e-4)
+    p_train.add_argument("--epochs", type=float, default=2.0)
+    p_train.add_argument("--grad-accum", type=int, default=16)
+    p_train.add_argument("--warmup-ratio", type=float, default=0.03)
+    p_train.add_argument("--lr-scheduler", type=str, default="cosine")
+    p_train.add_argument("--eval-steps", type=int, default=500)
+    p_train.add_argument("--save-steps", type=int, default=500)
+    p_train.add_argument("--save-total-limit", type=int, default=3)
+
+    sub.add_parser("evaluate", parents=[model_parent],
+                   help="Phase 5: WER/CER on domain + (if present) retention suite")
+
+    p_pub = sub.add_parser("publish", parents=[model_parent],
+                           help="Phase 6: push to the Hub")
+    g = p_pub.add_mutually_exclusive_group(required=True)
+    g.add_argument("--adapter-only", dest="merged", action="store_false")
+    g.add_argument("--merged", dest="merged", action="store_true")
+    p_pub.add_argument(
+        "--max-retention-wer-delta",
+        type=float,
+        default=0.02,
+        help="Maximum allowed absolute WER regression on retention suite to publish merged weights.",
+    )
+    p_pub.add_argument(
+        "--force-merged",
+        action="store_true",
+        help="Override retention gate and publish merged weights anyway (not recommended).",
+    )
+
+    p_all = sub.add_parser("all", parents=[model_parent],
+                           help="Run every phase end to end")
+    p_all.add_argument("--with-whisper", action="store_true")
+    p_all.add_argument("--push-prepared", action="store_true")
+    p_all.add_argument("--chunk-long-audio", action="store_true",
+                       help="Forward to prepare (see prepare --help).")
+    p_all.add_argument("--chunk-test", action="store_true",
+                       help="Forward to prepare (see prepare --help).")
+    p_all.add_argument(
+        "--retention-datasets",
+        nargs="+",
+        default=[],
+        help="Forward to prepare and train (for retention suite + replay).",
+    )
+    p_all.add_argument(
+        "--retention-eval",
+        action="store_true",
+        help="Also run baseline retention eval (requires --retention-datasets).",
+    )
+    p_all.add_argument(
+        "--replay-ratio",
+        type=float,
+        default=0.0,
+        help="Forward to train (recommended 0.02-0.10).",
+    )
+    p_all.add_argument("--lr", type=float, default=2e-4)
+    p_all.add_argument("--epochs", type=float, default=2.0)
+    p_all.add_argument("--grad-accum", type=int, default=16)
+    p_all.add_argument("--warmup-ratio", type=float, default=0.03)
+    p_all.add_argument("--lr-scheduler", type=str, default="cosine")
+    p_all.add_argument("--eval-steps", type=int, default=500)
+    p_all.add_argument("--save-steps", type=int, default=500)
+    p_all.add_argument("--save-total-limit", type=int, default=3)
+    p_all.add_argument("--merged", action="store_true",
+                       help="Publish merged weights instead of adapter only.")
+    p_all.add_argument("--max-retention-wer-delta", type=float, default=0.02)
+    p_all.add_argument("--force-merged", action="store_true")
+
+    args = ap.parse_args()
+
+    # Resolve model choice (no-op for inspect / prepare which don't load it).
+    if getattr(args, "model", None):
+        _apply_model_choice(args.model)
+
+    if args.cmd == "inspect":
+        phase_inspect(args)
+    elif args.cmd == "prepare":
+        phase_prepare(args)
+    elif args.cmd == "baseline":
+        phase_baseline(args)
+    elif args.cmd == "train":
+        phase_train(args)
+    elif args.cmd == "evaluate":
+        phase_evaluate(args)
+    elif args.cmd == "publish":
+        phase_publish(args)
+    elif args.cmd == "all":
+        phase_inspect(args)
+        prep_args = argparse.Namespace(
+            push=args.push_prepared,
+            chunk_long_audio=args.chunk_long_audio,
+            chunk_test=args.chunk_test,
+            retention_datasets=args.retention_datasets,
+            retention_chunk_test=bool(getattr(args, "retention_chunk_test", False)),
+        )
+        phase_prepare(prep_args)
+        base_args = argparse.Namespace(with_whisper=args.with_whisper, batch_size=4, retention_eval=args.retention_eval)
+        phase_baseline(base_args)
+        phase_train(args)
+        phase_evaluate(args)
+        phase_publish(args)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

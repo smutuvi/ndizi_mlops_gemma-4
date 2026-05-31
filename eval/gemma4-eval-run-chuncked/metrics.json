@@ -1,0 +1,76 @@
+{
+  "text_normalize": "jiwer_default",
+  "pooled": {
+    "wer": 0.45203105339379407,
+    "cer": 0.19110576066902688,
+    "n_utterances": 1041,
+    "wer_normalized": 0.40982788132369724,
+    "cer_normalized": 0.16587295491205162
+  },
+  "per_set": {
+    "smutuvi/ndizi-1:test": {
+      "wer": 0.4797610156833458,
+      "cer": 0.19627390635304462,
+      "n": 690,
+      "dropped_long": 0,
+      "chunk_length_s": 30.0,
+      "wer_normalized": 0.4367050725721981,
+      "cer_normalized": 0.1715954967669938
+    },
+    "smutuvi/ndizi-1-2025:test": {
+      "wer": 0.40362427481911217,
+      "cer": 0.1815881626621865,
+      "n": 351,
+      "dropped_long": 0,
+      "chunk_length_s": 30.0,
+      "wer_normalized": 0.3629663448995565,
+      "cer_normalized": 0.1552428451229773
+    }
+  },
+  "splits": {
+    "text_normalize": "jiwer_default",
+    "smutuvi/ndizi-1:test": {
+      "pooled": {
+        "wer": 0.4797610156833458,
+        "cer": 0.19627390635304462,
+        "n": 690,
+        "normalize": "none"
+      },
+      "smutuvi/ndizi-1": {
+        "wer": 0.4797610156833458,
+        "cer": 0.19627390635304462,
+        "n": 690,
+        "normalize": "none"
+      }
+    },
+    "smutuvi/ndizi-1-2025:test": {
+      "pooled": {
+        "wer": 0.40362427481911217,
+        "cer": 0.1815881626621865,
+        "n": 351,
+        "normalize": "none"
+      },
+      "smutuvi/ndizi-1-2025": {
+        "wer": 0.40362427481911217,
+        "cer": 0.1815881626621865,
+        "n": 351,
+        "normalize": "none"
+      }
+    }
+  },
+  "run_info": {
+    "checkpoint": "/home/smutuvi/ndizi_mlops_gemma-4/artifacts/checkpoints/best",
+    "base_model_id": "google/gemma-4-E2B-it",
+    "test_datasets": [
+      "smutuvi/ndizi-1:test",
+      "smutuvi/ndizi-1-2025:test"
+    ],
+    "output_dir": "/home/smutuvi/ndizi_mlops_gemma-4/eval/gemma4-eval-run-chuncked",
+    "batch_size": 4,
+    "chunk_length_s": 30.0,
+    "stride_length_s": null,
+    "max_audio_seconds": null,
+    "fp16": false,
+    "max_samples": null
+  }
+}

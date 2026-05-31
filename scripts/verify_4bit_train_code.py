@@ -10,6 +10,7 @@ TRAIN = ROOT / "src/training/train.py"
 LORA = ROOT / "src/models/gemma4_lora.py"
 
 REQUIRED_TRAIN_MARKERS = (
+    "from __future__ import annotations",
     "patch_gemma4_audio_finfo_for_kbit",
     "patch_gemma4_masked_scatter_dtype",
     "NDIZI_TRAIN_CODE_VERSION",

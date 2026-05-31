@@ -1,7 +1,8 @@
 # src/training/train.py — QLoRA fine-tune Gemma 4 for Swahili ASR (adapter-first).
+from __future__ import annotations
+
 # Bump when training behavior changes (helps confirm server git pull).
 NDIZI_TRAIN_CODE_VERSION = "4bit-audio-patches-v1"
-from __future__ import annotations
 
 import inspect
 import os

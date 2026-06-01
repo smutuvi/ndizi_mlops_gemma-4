@@ -2,3 +2,8 @@ peft>=0.10.0
 bitsandbytes>=0.43.0
 jiwer>=3.0.0
 torchaudio>=2.1.0
+# Optional: LiteRT-LM slim bundle (scripts/build_litert_lm_slim.py)
+# litert-lm-builder>=0.12.0
+# litert-torch-nightly
+# pillow
+# torchvision

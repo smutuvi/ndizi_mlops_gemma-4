@@ -53,6 +53,12 @@ DEFAULT_PROMPTS_FILE = next(
 )
 DEFAULT_MODEL_ID = "google/gemma-4-E2B-it"
 DEFAULT_THRESHOLD = 0.80
+
+NDIZI_SYSTEM_PROMPT = (
+    "Wewe ni msaidizi wa kukusanya taarifa za kilimo kutoka kwa wakulima. "
+    "Unaongea Kiswahili. Unauliza maswali kuhusu shamba, mazao, na hali ya kilimo. "
+    "Jibu kwa ufupi na kwa heshima, kama vile mtafiti wa shamba angefanya."
+)
 MAX_NEW_TOKENS = 200
 
 # Common Swahili function words — used for basic language detection.
@@ -170,8 +176,12 @@ def run_chat_prompt(
     model,
     processor,
     device,
+    system_prompt: str | None = None,
 ) -> str:
-    messages = [{"role": "user", "content": [{"type": "text", "text": prompt}]}]
+    messages = []
+    if system_prompt:
+        messages.append({"role": "system", "content": [{"type": "text", "text": system_prompt}]})
+    messages.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
     inputs_text = processor.apply_chat_template(
         messages,
         add_generation_prompt=True,
@@ -204,6 +214,12 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--output-dir", type=Path, default=Path("results/chat_eval"), help="Output directory")
     p.add_argument("--hf-token", default=None, help="HuggingFace access token")
     p.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Minimum pass_rate to exit 0 (default: 0.80)")
+    p.add_argument(
+        "--system-prompt",
+        default=None,
+        help="System prompt to set model role (e.g. survey interviewer). "
+             "Use 'ndizi' to apply the built-in Ndizi surveyor prompt.",
+    )
     p.add_argument("--device-map", choices=("cuda", "auto", "cpu"), default="cuda")
     p.add_argument("--max-samples", type=int, default=None, help="Cap number of prompts (debug)")
     return p.parse_args()
@@ -228,6 +244,9 @@ def main() -> None:
     if args.max_samples:
         prompts = prompts[: args.max_samples]
 
+    if args.system_prompt == "ndizi":
+        args.system_prompt = NDIZI_SYSTEM_PROMPT
+
     model, processor, device = load_model(
         args.model_id, args.base_model_id, token, args.device_map
     )
@@ -242,7 +261,7 @@ def main() -> None:
         category = item.get("category", "unknown")
 
         print(f"  [{prompt_id}] {prompt_text[:60]}")
-        response = run_chat_prompt(prompt_text, model, processor, device)
+        response = run_chat_prompt(prompt_text, model, processor, device, system_prompt=args.system_prompt)
         ok, failed_checks = score_response(response)
 
         if ok:

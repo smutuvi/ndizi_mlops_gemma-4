@@ -30,6 +30,33 @@ def main() -> int:
 
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", default="E2B")
+    p.add_argument(
+        "--training-mode",
+        choices=("asr_safe", "asr_moderate", "asr_max"),
+        default="asr_max",
+        help=(
+            "asr_safe   — projector-only, no LM LoRA; safest for chat preservation.\n"
+            "asr_moderate — tail LoRA on last N decoder layers + projectors; balanced.\n"
+            "asr_max    — full decoder LoRA (existing recipe); best ASR, breaks chat."
+        ),
+    )
+    p.add_argument(
+        "--tail-lora-layers",
+        type=int,
+        default=6,
+        help="[asr_moderate] Number of tail decoder layers to apply LoRA to (default 6).",
+    )
+    p.add_argument(
+        "--tail-lora-rank",
+        type=int,
+        default=8,
+        help="[asr_moderate] LoRA rank for tail layers (default 8; alpha = 2x rank).",
+    )
+    p.add_argument(
+        "--short-instruction",
+        action="store_true",
+        help="Use SHORT_ASR_INSTRUCTION in training examples (recommended for asr_safe/moderate).",
+    )
     p.add_argument("--retention-datasets", nargs="+", default=[])
     p.add_argument("--replay-ratio", type=float, default=0.0)
     p.add_argument("--lr", type=float, default=2e-4)

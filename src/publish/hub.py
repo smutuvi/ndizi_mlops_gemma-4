@@ -2,7 +2,10 @@
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import textwrap
+from pathlib import Path
 from typing import Any
 
 import torch
@@ -10,8 +13,10 @@ from huggingface_hub import HfApi
 from peft import PeftModel
 from transformers import AutoModelForMultimodalLM, AutoProcessor
 
+from src.models.gemma4_lora import is_projector_only_checkpoint, load_projector_checkpoint
 from src.utils.constants import SRC_DATASETS
 from src.utils.paths import (
+    ARTIFACTS_DIR,
     BASELINE_JSON,
     CHECKPOINT_DIR,
     FINETUNED_JSON,
@@ -82,14 +87,62 @@ def wer_table() -> str:
     return "\n".join(rows)
 
 
+def chat_gate_ok(
+    adapter_dir: Path,
+    prompts_file: Path | None,
+    threshold: float,
+    *,
+    skip: bool = False,
+) -> tuple[bool, str]:
+    """Run eval_chat.py against the checkpoint and return (passed, message)."""
+    if skip:
+        return True, "Chat gate skipped (--skip-chat-gate)"
+
+    # Locate eval_chat.py — lives in additional_scripts/ or a sibling scripts dir.
+    candidates = [
+        Path(__file__).resolve().parents[2] / "additional_scripts" / "eval_chat.py",
+        Path(__file__).resolve().parents[2] / "scripts" / "eval_chat.py",
+    ]
+    eval_chat = next((p for p in candidates if p.exists()), None)
+    if eval_chat is None:
+        return False, "eval_chat.py not found — copy it to additional_scripts/ or scripts/"
+
+    out_dir = ARTIFACTS_DIR / "chat_gate"
+    cmd = [
+        sys.executable, str(eval_chat),
+        "--model-id", str(adapter_dir),
+        "--base-model-id", get_runtime().base_model_id,
+        "--output-dir", str(out_dir),
+        "--threshold", str(threshold),
+        "--device-map", "auto",
+    ]
+    if prompts_file and prompts_file.exists():
+        cmd += ["--prompts-file", str(prompts_file)]
+
+    print("[publish] Running chat gate:", " ".join(cmd))
+    result = subprocess.run(cmd, check=False)
+    if result.returncode == 0:
+        return True, f"Chat gate PASS (threshold={threshold:.0%})"
+    try:
+        metrics = json.loads((out_dir / "chat_metrics.json").read_text())
+        return False, (
+            f"Chat gate FAIL: pass_rate={metrics.get('pass_rate', '?'):.1%} "
+            f"< threshold={threshold:.0%}"
+        )
+    except Exception:
+        return False, f"Chat gate FAIL (eval_chat.py exited {result.returncode})"
+
+
 def run_publish(args) -> None:
     rt = get_runtime()
     api = HfApi()
-    api.create_repo(rt.output_model_repo, repo_type="model", private=False, exist_ok=True)
+    publish_merged = bool(args.merged)
+    target_repo = rt.merged_model_repo if publish_merged else rt.output_model_repo
+    api.create_repo(target_repo, repo_type="model", private=False, exist_ok=True)
 
     processor = AutoProcessor.from_pretrained(rt.base_model_id)
 
-    card = textwrap.dedent(
+    adapter_card = textwrap.dedent(
         f"""
     ---
     base_model: {rt.base_model_id}
@@ -110,10 +163,53 @@ def run_publish(args) -> None:
 
     ## Training
     QLoRA (4-bit nf4, bf16 compute), rank 32 alpha 64, audio projector unfrozen.
+
+  Merged weights: [{rt.merged_model_repo}](https://huggingface.co/{rt.merged_model_repo})
     """
     ).strip()
 
-    if args.merged:
+    merged_card = textwrap.dedent(
+        f"""
+    ---
+    base_model: {rt.base_model_id}
+    license: gemma
+    language: [sw]
+    tags: [automatic-speech-recognition, swahili, gemma-4]
+    datasets: [{SRC_DATASETS[0]}, {SRC_DATASETS[1]}]
+    ---
+
+    # Gemma 4 - Swahili ASR (ndizi, merged)
+
+    Full weights: `{rt.base_model_id}` + LoRA from [{rt.output_model_repo}](https://huggingface.co/{rt.output_model_repo}).
+
+    ## Evaluation
+    {wer_table()}
+
+    ## Training
+    QLoRA (4-bit nf4, bf16 compute), rank 32 alpha 64, audio projector unfrozen.
+    """
+    ).strip()
+
+    adapter_dir = CHECKPOINT_DIR / "best"
+
+    # Chat gate — runs before any merge/upload.
+    skip_chat = bool(getattr(args, "skip_chat_gate", False))
+    chat_threshold = float(getattr(args, "chat_gate_threshold", 0.80))
+    chat_prompts = getattr(args, "chat_prompts_file", None)
+    chat_ok, chat_msg = chat_gate_ok(
+        adapter_dir,
+        Path(chat_prompts) if chat_prompts else None,
+        chat_threshold,
+        skip=skip_chat,
+    )
+    print("[publish] chat gate:", chat_msg)
+    if not chat_ok and not bool(getattr(args, "force_merged", False)):
+        raise SystemExit(
+            "Refusing to publish: chat quality gate failed. "
+            "Use --skip-chat-gate or --force-merged to override."
+        )
+
+    if publish_merged:
         max_delta = float(getattr(args, "max_retention_wer_delta", 0.02))
         ok, msg = retention_ok(max_delta)
         print("[publish] retention check:", msg)
@@ -125,14 +221,31 @@ def run_publish(args) -> None:
         base = AutoModelForMultimodalLM.from_pretrained(
             rt.base_model_id, dtype=torch.bfloat16, device_map="cpu"
         )
-        merged = PeftModel.from_pretrained(base, str(CHECKPOINT_DIR / "best"))
-        merged = merged.merge_and_unload()
+        if is_projector_only_checkpoint(adapter_dir):
+            print("[publish] asr_safe checkpoint detected — loading projector weights onto base model")
+            merged = load_projector_checkpoint(base, adapter_dir)
+        else:
+            merged = PeftModel.from_pretrained(base, str(adapter_dir))
+            merged = merged.merge_and_unload()
         merged.save_pretrained(str(MERGED_LOCAL), safe_serialization=True)
         processor.save_pretrained(str(MERGED_LOCAL))
-        (MERGED_LOCAL / "README.md").write_text(card, encoding="utf-8")
-        api.upload_folder(repo_id=rt.output_model_repo, folder_path=str(MERGED_LOCAL), repo_type="model")
+        (MERGED_LOCAL / "README.md").write_text(merged_card, encoding="utf-8")
+        commit = getattr(args, "commit_message", None) or "Publish merged weights from training checkpoint"
+        api.upload_folder(
+            repo_id=target_repo,
+            folder_path=str(MERGED_LOCAL),
+            repo_type="model",
+            commit_message=commit,
+        )
     else:
-        adapter_dir = CHECKPOINT_DIR / "best"
-        (adapter_dir / "README.md").write_text(card, encoding="utf-8")
-        api.upload_folder(repo_id=rt.output_model_repo, folder_path=str(adapter_dir), repo_type="model")
-    print(f"Published to https://huggingface.co/{rt.output_model_repo}")
+        if not adapter_dir.is_dir():
+            raise SystemExit(f"Adapter checkpoint not found: {adapter_dir}")
+        (adapter_dir / "README.md").write_text(adapter_card, encoding="utf-8")
+        commit = getattr(args, "commit_message", None) or "Publish LoRA adapter from training checkpoint"
+        api.upload_folder(
+            repo_id=target_repo,
+            folder_path=str(adapter_dir),
+            repo_type="model",
+            commit_message=commit,
+        )
+    print(f"Published to https://huggingface.co/{target_repo}")

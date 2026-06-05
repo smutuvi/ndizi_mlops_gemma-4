@@ -13,6 +13,7 @@ class GemmaASRCollator:
     """Gemma 4 audio-token accounting requires one audio per batch."""
 
     proc: Any
+    instruction: str = ASR_INSTRUCTION
 
     def __call__(self, batch):
         if len(batch) != 1:
@@ -26,7 +27,7 @@ class GemmaASRCollator:
         inputs = gemma_build_inputs(
             self.proc,
             wave,
-            ASR_INSTRUCTION,
+            self.instruction,
             add_generation_prompt=False,
             assistant_text=target,
         )

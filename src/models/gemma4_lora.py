@@ -8,12 +8,16 @@
 # https://github.com/huggingface/peft/issues/3129
 from __future__ import annotations
 
+import json
 import logging
 import re
+from pathlib import Path
 from typing import Any
 
+import torch
 import torch.nn as nn
 from peft import LoraConfig, get_peft_model
+from safetensors.torch import load_file, save_file
 from transformers import BitsAndBytesConfig
 
 logger = logging.getLogger(__name__)
@@ -238,3 +242,108 @@ def patch_clippable_linear_for_peft() -> None:
     PatchedClippableLinear._ndizi_peft_patched = True  # type: ignore[attr-defined]
     modeling_gemma4.Gemma4ClippableLinear = PatchedClippableLinear
     logger.warning("Applied Gemma4ClippableLinear PEFT monkey-patch (use only if regex LoRA fails)")
+
+
+# ── asr_safe: projector-only training (no LM LoRA) ────────────────────────────
+
+PROJECTOR_MODULE_KEYS = ("audio_projector", "multi_modal_projector")
+
+
+def freeze_lm_decoder(model: Any) -> Any:
+    """Freeze all parameters except audio_projector and multi_modal_projector.
+
+    Used for asr_safe training mode — only the multimodal projection layers are
+    updated, leaving the LM decoder weights completely unchanged.
+    """
+    for name, param in model.named_parameters():
+        if any(k in name for k in PROJECTOR_MODULE_KEYS):
+            param.requires_grad_(True)
+        else:
+            param.requires_grad_(False)
+    trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
+    total = sum(p.numel() for p in model.parameters())
+    logger.info(
+        "[asr_safe] Trainable params: %s / %s (%.2f%%) — projectors only",
+        f"{trainable:,}", f"{total:,}", 100.0 * trainable / total,
+    )
+    return model
+
+
+def save_projector_checkpoint(model: Any, out_dir: Path | str) -> None:
+    """Save only projector weights + a mode marker. Compatible with load_projector_checkpoint."""
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    state = {
+        k: v.cpu().contiguous()
+        for k, v in model.state_dict().items()
+        if any(key in k for key in PROJECTOR_MODULE_KEYS)
+    }
+    save_file(state, out_dir / "projector_weights.safetensors")
+    (out_dir / "training_mode.json").write_text(
+        json.dumps({"training_mode": "asr_safe", "saved_modules": list(PROJECTOR_MODULE_KEYS)}),
+        encoding="utf-8",
+    )
+    logger.info("Saved projector-only checkpoint (%d tensors) to %s", len(state), out_dir)
+
+
+def is_projector_only_checkpoint(adapter_dir: Path | str) -> bool:
+    return (Path(adapter_dir) / "training_mode.json").exists()
+
+
+def load_projector_checkpoint(model: Any, adapter_dir: Path | str) -> Any:
+    """Overlay projector weights from an asr_safe checkpoint onto a base model."""
+    state = load_file(str(Path(adapter_dir) / "projector_weights.safetensors"))
+    missing, unexpected = model.load_state_dict(state, strict=False)
+    if unexpected:
+        logger.warning("Unexpected keys in projector checkpoint: %s", unexpected[:5])
+    logger.info(
+        "Loaded projector weights (%d tensors); %d keys not in checkpoint",
+        len(state), len(missing),
+    )
+    return model
+
+
+# ── asr_moderate: tail-LoRA on last N decoder layers + full projector save ────
+
+def _count_decoder_layers(model: Any) -> int:
+    max_idx = -1
+    for name, _ in model.named_modules():
+        m = re.search(r"language_model\.model\.layers\.(\d+)\.", name)
+        if m:
+            max_idx = max(max_idx, int(m.group(1)))
+    if max_idx < 0:
+        raise RuntimeError("Could not determine decoder layer count from model.named_modules()")
+    return max_idx + 1
+
+
+def build_asr_moderate_lora_config(
+    model: Any,
+    *,
+    num_tail_layers: int = 6,
+    r: int = 8,
+    lora_alpha: int = 16,
+    lora_dropout: float = 0.05,
+) -> LoraConfig:
+    """LoRA on the last num_tail_layers decoder layers only, plus full projector saves."""
+    total = _count_decoder_layers(model)
+    first_tail = max(0, total - num_tail_layers)
+    tail_indices = "|".join(str(i) for i in range(first_tail, total))
+    target_regex = (
+        r"^(?=.*\.language_model\.)"
+        rf"(?=.*\.layers\.({tail_indices})\.).*"
+        r"\.(?:self_attn|mlp)\."
+        r"(?:q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$"
+    )
+    logger.info(
+        "[asr_moderate] Tail LoRA: layers %d–%d of %d (r=%d, alpha=%d)",
+        first_tail, total - 1, total, r, lora_alpha,
+    )
+    return LoraConfig(
+        r=r,
+        lora_alpha=lora_alpha,
+        lora_dropout=lora_dropout,
+        bias="none",
+        target_modules=target_regex,
+        modules_to_save=list(PROJECTOR_MODULE_KEYS),
+        task_type="CAUSAL_LM",
+    )

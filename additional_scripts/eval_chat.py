@@ -93,7 +93,9 @@ def _not_digits_only(text: str) -> bool:
 
 def _has_swahili_content(text: str, min_fraction: float = 0.15) -> bool:
     """At least min_fraction of tokens should be recognisable Swahili words."""
-    tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", text.lower())
+    # Strip markdown formatting before counting so bold/emoji don't dilute the ratio.
+    clean = re.sub(r"\*+|_+|`+|#{1,6}\s?|!\[.*?\]\(.*?\)|\[.*?\]\(.*?\)", "", text)
+    tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", clean.lower())
     if not tokens:
         return False
     swahili_count = sum(1 for t in tokens if t in _SWAHILI_TOKENS)

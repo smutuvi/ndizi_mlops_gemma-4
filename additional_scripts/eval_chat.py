@@ -44,7 +44,13 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-DEFAULT_PROMPTS_FILE = SCRIPT_DIR.parent / "data" / "chat_eval_prompts.jsonl"
+DEFAULT_PROMPTS_FILE = next(
+    (p for p in [
+        SCRIPT_DIR / "chat_eval_prompts.jsonl",
+        SCRIPT_DIR.parent / "data" / "chat_eval_prompts.jsonl",
+    ] if p.exists()),
+    SCRIPT_DIR / "chat_eval_prompts.jsonl",
+)
 DEFAULT_MODEL_ID = "google/gemma-4-E2B-it"
 DEFAULT_THRESHOLD = 0.80
 MAX_NEW_TOKENS = 200

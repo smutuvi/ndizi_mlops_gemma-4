@@ -17,6 +17,9 @@ Reuse an existing full export (~5GB) without re-running export_hf:
     --skip-export \\
     --finetuned-litertlm /path/to/gemma-4-e2b-sw-asr-ndizi.litertlm \\
     --upload
+
+Phone hangs on ~4GB finetuned rebuild — publish official ~2.6GB shell (not finetuned):
+  python scripts/build_litert_lm_slim.py --official-shell --upload
 """
 from __future__ import annotations
 
@@ -54,6 +57,11 @@ def main() -> int:
         help="Path to finetuned .litertlm (with --skip-export)",
     )
     p.add_argument("--upload", action="store_true", help="Upload bundle + README to --hub-repo")
+    p.add_argument(
+        "--official-shell",
+        action="store_true",
+        help="Copy litert-community E2B ~2.6GB bundle (low RAM; stock ASR, not Ndizi-finetuned)",
+    )
     args = p.parse_args()
     run_build(args)
     return 0

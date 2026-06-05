@@ -1,7 +1,23 @@
 # src/eval/normalize.py — WER/CER text normalization (aligned with ndizi_mlops evaluate_asr_batch).
 from __future__ import annotations
 
+import re
 from typing import Any, Dict
+
+
+def polish_transcript_casing(text: str) -> str:
+    """Capitalize sentence starts after decode (does not infer proper nouns mid-sentence)."""
+    s = str(text).strip()
+    if not s:
+        return s
+    if s[0].islower():
+        s = s[0].upper() + s[1:]
+    s = re.sub(
+        r"([.!?]\s+)([a-z\u00e0-\u024f])",
+        lambda m: m.group(1) + m.group(2).upper(),
+        s,
+    )
+    return s
 
 TEXT_NORMALIZE_CHOICES = ("none", "simple", "jiwer_default")
 TEXT_NORMALIZE_DEFAULT = "jiwer_default"  # baseline / programmatic fallback

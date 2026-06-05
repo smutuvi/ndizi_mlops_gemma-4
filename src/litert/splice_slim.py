@@ -295,7 +295,14 @@ def build_litertlm_from_toml(toml_path: Path, output_litertlm: Path) -> None:
     )
 
 
-def publish_litertlm(local_path: Path, repo_id: str, path_in_repo: str, *, private: bool = False) -> None:
+def publish_litertlm(
+    local_path: Path,
+    repo_id: str,
+    path_in_repo: str,
+    *,
+    private: bool = False,
+    commit_message: str = "Ndizi Swahili ASR LiteRT-LM slim (Google E2B shell + finetuned LLM)",
+) -> None:
     api = HfApi()
     api.create_repo(repo_id, repo_type="model", private=private, exist_ok=True)
     api.upload_file(
@@ -303,7 +310,7 @@ def publish_litertlm(local_path: Path, repo_id: str, path_in_repo: str, *, priva
         path_in_repo=path_in_repo,
         repo_id=repo_id,
         repo_type="model",
-        commit_message="Ndizi Swahili ASR LiteRT-LM slim (Google E2B shell + finetuned LLM)",
+        commit_message=commit_message,
     )
     print(f"Published https://huggingface.co/{repo_id}/resolve/main/{path_in_repo}")
 
@@ -411,10 +418,82 @@ def build_slim_bundle(
     return output_litertlm
 
 
+def build_official_shell_bundle(work_dir: Path, *, output_name: str = DEFAULT_OUTPUT_NAME) -> Path:
+    """Copy Google's ~2.6 GB E2B .litertlm (loads on typical phones; not Ndizi-finetuned)."""
+    work_dir.mkdir(parents=True, exist_ok=True)
+    base_litertlm = download_base_litertlm(work_dir / "base")
+    output_litertlm = work_dir / output_name
+    if output_litertlm.exists():
+        output_litertlm.unlink()
+    shutil.copy2(base_litertlm, output_litertlm)
+    size_gb = output_litertlm.stat().st_size / 1e9
+    print(f"Official shell (low RAM): {output_litertlm} ({size_gb:.2f} GB)")
+    print(
+        "[info] This is the stock google/gemma-4-E2B-it LiteRT bundle, not Ndizi-finetuned. "
+        "Use GPU/server ASR with smutuvi/gemma-4-e2b-sw-asr-ndizi-merged for Ndizi WER."
+    )
+    return output_litertlm
+
+
+def write_readme_official_shell(work_dir: Path, repo_id: str, filename: str) -> None:
+    readme = work_dir / "README.md"
+    readme.write_text(
+        f"""---
+base_model: google/gemma-4-E2B-it
+license: gemma
+tags:
+  - litert-lm
+  - automatic-speech-recognition
+  - swahili
+  - gemma-4
+  - low-ram
+---
+
+# Gemma 4 E2B LiteRT-LM (low RAM, official shell)
+
+**~2.6 GB** — same file as [{BASE_LITERT_REPO}](https://huggingface.co/{BASE_LITERT_REPO}) (`{BASE_LITERT_FILE}`),
+renamed for Sikia as `{filename}`.
+
+Use this on phones that **hang or OOM** on the ~4–5 GB custom finetuned LiteRT builds.
+
+## Ndizi Swahili ASR quality
+
+This bundle is **not** the Ndizi fine-tune. For production ASR WER, use:
+
+- **GPU / server:** [smutuvi/gemma-4-e2b-sw-asr-ndizi-merged](https://huggingface.co/smutuvi/gemma-4-e2b-sw-asr-ndizi-merged) or LoRA [smutuvi/gemma-4-e2b-sw-asr-ndizi](https://huggingface.co/smutuvi/gemma-4-e2b-sw-asr-ndizi)
+- **Heavy on-device finetuned LiteRT:** [smutuvi/gemma-4-e2b-sw-asr-ndizi-litert-lm](https://huggingface.co/smutuvi/gemma-4-e2b-sw-asr-ndizi-litert-lm) (~5 GB) or spliced rebuild (~4 GB)
+
+A finetuned bundle near **2.6 GB** needs in-container splice (not unpack/repack); track `scripts/build_litert_lm_slim.py` in `ndizi_mlops_gemma-4`.
+""",
+        encoding="utf-8",
+    )
+
+
 def run_build(args) -> None:
     from src.utils.paths import ARTIFACTS_DIR
 
     work_dir = Path(getattr(args, "work_dir", None) or ARTIFACTS_DIR / "litert_slim")
+
+    if getattr(args, "official_shell", False):
+        output = build_official_shell_bundle(work_dir, output_name=args.output_name)
+        if args.upload:
+            publish_litertlm(
+                output,
+                args.hub_repo,
+                args.output_name,
+                commit_message="Low-RAM official E2B LiteRT shell (~2.6 GB)",
+            )
+            write_readme_official_shell(work_dir, args.hub_repo, args.output_name)
+            api = HfApi()
+            api.upload_file(
+                path_or_fileobj=str(work_dir / "README.md"),
+                path_in_repo="README.md",
+                repo_id=args.hub_repo,
+                repo_type="model",
+                commit_message="Document low-RAM official shell vs finetuned bundles",
+            )
+        return
+
     output = build_slim_bundle(
         work_dir,
         merged_model=args.merged_model,

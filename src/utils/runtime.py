@@ -16,6 +16,10 @@ class GemmaRuntime:
     base_model_id: str = "google/gemma-4-E2B-it"
     output_model_repo: str = "smutuvi/gemma-4-e2b-sw-asr-ndizi"
 
+    @property
+    def merged_model_repo(self) -> str:
+        return f"{self.output_model_repo}-merged"
+
 
 _runtime = GemmaRuntime()
 
@@ -38,4 +42,5 @@ def apply_model_choice(name: str) -> GemmaRuntime:
     )
     print(f"[config] BASE_MODEL_ID     = {_runtime.base_model_id}")
     print(f"[config] OUTPUT_MODEL_REPO = {_runtime.output_model_repo}")
+    print(f"[config] MERGED_MODEL_REPO  = {_runtime.merged_model_repo}")
     return _runtime

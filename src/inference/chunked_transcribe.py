@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import numpy as np
 
+from src.eval.normalize import polish_transcript_casing
 from src.inference.gemma_inputs import resample_mono_16k
 from src.inference.transcribe import gemma_transcribe
 from src.utils.constants import ASR_INSTRUCTION, MAX_AUDIO_SEC, TARGET_SR
@@ -53,11 +54,13 @@ def gemma_transcribe_chunked(
         )
         parts: list[str] = []
         for chunk in chunks:
-            hyp = gemma_transcribe(model, processor, [chunk], instruction=instruction)[0]
+            hyp = gemma_transcribe(
+                model, processor, [chunk], instruction=instruction, casing_polish=False
+            )[0]
             hyp = str(hyp).strip()
             if hyp:
                 parts.append(hyp)
-        results.append(" ".join(parts))
+        results.append(polish_transcript_casing(" ".join(parts)))
     return results
 
 
@@ -84,16 +87,19 @@ def make_gemma_predict_fn(
     *,
     chunk_length_s: float | None = None,
     stride_length_s: float | None = None,
+    instruction: str = ASR_INSTRUCTION,
 ):
     if chunk_length_s is not None and chunk_length_s > 0:
         cls = chunk_length_s
         st = stride_length_s
+        ins = instruction
 
         def predict(audios):
             return gemma_transcribe_chunked(
-                model, processor, audios, chunk_length_s=cls, stride_length_s=st
+                model, processor, audios, chunk_length_s=cls, stride_length_s=st, instruction=ins
             )
 
         return predict
 
-    return lambda audios: gemma_transcribe(model, processor, audios)
+    ins = instruction
+    return lambda audios: gemma_transcribe(model, processor, audios, instruction=ins)

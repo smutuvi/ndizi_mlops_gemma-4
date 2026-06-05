@@ -35,7 +35,7 @@ sys.path.insert(0, str(ROOT))
 
 from src.eval.finetuned import run_evaluate, run_transcribe_file  # noqa: E402
 from src.eval.normalize import TEXT_NORMALIZE_EVAL_DEFAULT, add_normalize_arg  # noqa: E402
-from src.utils.constants import MAX_AUDIO_SEC  # noqa: E402
+from src.utils.constants import ASR_INSTRUCTION, MAX_AUDIO_SEC, PUNCTUATION_ASR_INSTRUCTION  # noqa: E402
 from src.utils.paths import CHECKPOINT_DIR  # noqa: E402
 from src.utils.runtime import apply_model_choice  # noqa: E402
 
@@ -143,8 +143,18 @@ def main() -> int:
         help="Smoke test: cap max_samples to a tiny value and write to output_dir/smoke",
     )
 
+    p.add_argument(
+        "--instruction",
+        choices=("default", "punctuation"),
+        default="punctuation",
+        help="ASR instruction variant: 'punctuation' (default) forces punctuation+casing; "
+             "'default' uses the softer variant.",
+    )
     add_normalize_arg(p, default=TEXT_NORMALIZE_EVAL_DEFAULT)
     args = p.parse_args()
+    args.asr_instruction = (
+        PUNCTUATION_ASR_INSTRUCTION if args.instruction == "punctuation" else ASR_INSTRUCTION
+    )
 
     if args.anti_loop_decode:
         if args.max_new_tokens == 256:

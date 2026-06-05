@@ -29,7 +29,7 @@ from src.eval.normalize import (
 from src.inference.chunked_transcribe import make_gemma_predict_fn, resolve_chunk_length_s
 from src.inference.gemma_inputs import load_audio_file
 from src.inference.transcribe import gemma_transcribe
-from src.utils.constants import AUDIO_COLUMN, TEXT_COLUMN
+from src.utils.constants import AUDIO_COLUMN, PUNCTUATION_ASR_INSTRUCTION, TEXT_COLUMN
 from src.utils.paths import (
     CHECKPOINT_DIR,
     FINETUNED_JSON,
@@ -144,8 +144,9 @@ def run_transcribe_file(args) -> None:
         chunk_s = resolve_chunk_length_s(
             None, max_clip_duration_s=dur, auto_chunk_long=auto_chunk
         )
+    instruction = getattr(args, "asr_instruction", PUNCTUATION_ASR_INSTRUCTION)
     predict = make_gemma_predict_fn(
-        model, processor, chunk_length_s=chunk_s, stride_length_s=stride_s
+        model, processor, chunk_length_s=chunk_s, stride_length_s=stride_s, instruction=instruction
     )
     hyp = predict([audio])[0]
 
@@ -225,8 +226,9 @@ def run_evaluate(args) -> None:
                 print(f"[finetuned] {name}: dropped {dropped} clips > {max_audio_seconds}s")
 
         print(f"\n[finetuned] {name} ({len(eval_split)} rows, chunk_length_s={chunk_s})")
+        instruction = getattr(args, "asr_instruction", PUNCTUATION_ASR_INSTRUCTION)
         predict = make_gemma_predict_fn(
-            model, processor, chunk_length_s=chunk_s, stride_length_s=stride_s
+            model, processor, chunk_length_s=chunk_s, stride_length_s=stride_s, instruction=instruction
         )
         refs, hyps, groups = eval_with(
             predict,

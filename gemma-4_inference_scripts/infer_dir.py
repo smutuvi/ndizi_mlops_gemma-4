@@ -143,11 +143,29 @@ def scan_audio_files(directory: Path, max_samples: int | None) -> list[Path]:
 
 
 # ── .env / API key resolution ─────────────────────────────────────────────────
+def _dotenv_search_paths() -> list[Path]:
+    """Collect .env files from cwd/script ancestors (merge all, first wins per key)."""
+    seen: set[str] = set()
+    paths: list[Path] = []
+    for base in (Path.cwd().resolve(), SCRIPT_DIR.parent.resolve()):
+        p = base
+        while True:
+            candidate = p / ".env"
+            key = str(candidate)
+            if key not in seen:
+                seen.add(key)
+                paths.append(candidate)
+            if p.parent == p:
+                break
+            p = p.parent
+    return paths
+
+
 def _load_dotenv(*paths: str | Path) -> None:
     """Minimal .env parser — sets os.environ without overwriting existing keys."""
     for env_path in paths:
         p = Path(env_path)
-        if not p.exists():
+        if not p.is_file():
             continue
         for line in p.read_text(encoding="utf-8").splitlines():
             line = line.strip()
@@ -155,14 +173,17 @@ def _load_dotenv(*paths: str | Path) -> None:
                 continue
             k, v = line.split("=", 1)
             os.environ.setdefault(k.strip(), v.strip().strip("\"'"))
-        return
 
 
 def resolve_openrouter_key(cli_key: str | None) -> str | None:
     if cli_key:
         return cli_key.strip()
-    _load_dotenv(".env", Path.cwd() / ".env", SCRIPT_DIR.parent / ".env", SCRIPT_DIR / ".env")
-    return os.environ.get("OPENROUTER_API_KEY", "").strip() or None
+    _load_dotenv(*_dotenv_search_paths())
+    for env_name in ("OPENROUTER_API_KEY", "OPENROUTER_KEY"):
+        val = os.environ.get(env_name, "").strip()
+        if val:
+            return val
+    return None
 
 
 # ── Gemma audio helpers ───────────────────────────────────────────────────────
@@ -774,6 +795,51 @@ def _write_model_csv(output_dir: Path, model_name: str, rows: list[dict[str, Any
     print(f"  Wrote {csv_path.name}")
 
 
+def _sync_combined_from_model_results(
+    combined: dict[str, dict[str, Any]],
+    model_results: dict[str, list[dict[str, Any]]],
+) -> None:
+    """Ensure every per-model CSV row is reflected in the combined JSON payload."""
+    for model_name, rows in model_results.items():
+        pred_key = f"prediction_{model_name}"
+        rtfx_key = f"rtfx_{model_name}"
+        for row in rows:
+            fname = str(row["audio_file"])
+            combined.setdefault(fname, {"audio_file": fname})
+            if "audio_duration_s" not in combined[fname]:
+                combined[fname]["audio_duration_s"] = row.get("audio_duration_s")
+            combined[fname][pred_key] = row.get("prediction", "")
+            combined[fname][rtfx_key] = row.get("rtfx")
+
+
+def _merge_model_csvs_into_combined(
+    output_dir: Path,
+    combined: dict[str, dict[str, Any]],
+    model_names: list[str],
+) -> None:
+    """Backfill combined rows from on-disk per-model CSVs (e.g. after a partial run)."""
+    for model_name in model_names:
+        csv_path = output_dir / f"predictions_{model_name}.csv"
+        if not csv_path.is_file():
+            continue
+        pred_key = f"prediction_{model_name}"
+        rtfx_key = f"rtfx_{model_name}"
+        with csv_path.open(encoding="utf-8", newline="") as f:
+            for row in csv.DictReader(f):
+                fname = str(row.get("audio_file") or "")
+                if not fname:
+                    continue
+                combined.setdefault(fname, {"audio_file": fname})
+                if row.get("audio_duration_s"):
+                    combined[fname].setdefault(
+                        "audio_duration_s", float(row["audio_duration_s"])
+                    )
+                if row.get("prediction") is not None:
+                    combined[fname][pred_key] = row["prediction"]
+                if rtfx_key not in combined[fname] and row.get("rtfx"):
+                    combined[fname][rtfx_key] = row.get("rtfx")
+
+
 def _write_combined_predictions_json(
     output_dir: Path, combined: dict[str, dict[str, Any]]
 ) -> Path:
@@ -791,6 +857,17 @@ def _write_combined_predictions_json(
         json.dumps(ordered_rows, indent=2, ensure_ascii=False) + "\n", encoding="utf-8"
     )
     return path
+
+
+def _flush_combined_predictions(
+    output_dir: Path,
+    combined: dict[str, dict[str, Any]],
+    model_results: dict[str, list[dict[str, Any]]],
+    models_requested: list[str],
+) -> Path:
+    _sync_combined_from_model_results(combined, model_results)
+    _merge_model_csvs_into_combined(output_dir, combined, models_requested)
+    return _write_combined_predictions_json(output_dir, combined)
 
 
 def build_metrics_summary(
@@ -954,6 +1031,7 @@ def main() -> None:
             combined[fname]["rtfx_gemma4"] = rtfx
         model_results["gemma4"] = rows
         _write_model_csv(args.output_dir, "gemma4", rows)
+        _flush_combined_predictions(args.output_dir, combined, model_results, args.models)
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -989,6 +1067,7 @@ def main() -> None:
             combined[fname]["rtfx_gemma4_12b"] = rtfx
         model_results["gemma4_12b"] = rows
         _write_model_csv(args.output_dir, "gemma4_12b", rows)
+        _flush_combined_predictions(args.output_dir, combined, model_results, args.models)
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -998,29 +1077,32 @@ def main() -> None:
         print(f"\n{'='*60}\ngemini backend ({GEMINI_MODEL_ID} via OpenRouter)\n{'='*60}")
         api_key = resolve_openrouter_key(args.openrouter_key)
         if not api_key:
-            print(
-                "WARNING: No OPENROUTER_API_KEY found — skipping gemini backend.\n"
-                "  Add OPENROUTER_API_KEY=sk-or-... to a .env file, or pass --openrouter-key"
+            searched = ", ".join(str(p) for p in _dotenv_search_paths())
+            raise SystemExit(
+                "gemini was requested but no OpenRouter API key was found.\n"
+                "  Set OPENROUTER_API_KEY=sk-or-... in a .env file, export it in the shell,\n"
+                "  or pass --openrouter-key sk-or-...\n"
+                f"  Searched .env paths: {searched}"
             )
-        else:
-            rows = []
-            for fname, arr, dur in audio_arrays:
-                print(f"  {fname}", end=" ... ", flush=True)
-                t0 = time.perf_counter()
-                try:
-                    hyp = transcribe_gemini(arr, api_key)
-                except Exception as exc:
-                    print(f"\n    ERROR: {exc}")
-                    hyp = f"[ERROR: {exc}]"
-                wall = time.perf_counter() - t0
-                print(f"{wall:.1f}s")
-                rows.append({"audio_file": fname, "prediction": hyp,
-                              "audio_duration_s": round(dur, 3),
-                              "decode_wall_s": round(wall, 3), "rtfx": None})
-                combined[fname]["prediction_gemini"] = hyp
-                combined[fname]["rtfx_gemini"] = None
-            model_results["gemini"] = rows
-            _write_model_csv(args.output_dir, "gemini", rows)
+        rows = []
+        for fname, arr, dur in audio_arrays:
+            print(f"  {fname}", end=" ... ", flush=True)
+            t0 = time.perf_counter()
+            try:
+                hyp = transcribe_gemini(arr, api_key)
+            except Exception as exc:
+                print(f"\n    ERROR: {exc}")
+                hyp = f"[ERROR: {exc}]"
+            wall = time.perf_counter() - t0
+            print(f"{wall:.1f}s")
+            rows.append({"audio_file": fname, "prediction": hyp,
+                          "audio_duration_s": round(dur, 3),
+                          "decode_wall_s": round(wall, 3), "rtfx": None})
+            combined[fname]["prediction_gemini"] = hyp
+            combined[fname]["rtfx_gemini"] = None
+        model_results["gemini"] = rows
+        _write_model_csv(args.output_dir, "gemini", rows)
+        _flush_combined_predictions(args.output_dir, combined, model_results, args.models)
 
     # ── whisper ───────────────────────────────────────────────────────────────
     if "whisper" in args.models:
@@ -1042,6 +1124,7 @@ def main() -> None:
             combined[fname]["rtfx_whisper"] = rtfx
         model_results["whisper"] = rows
         _write_model_csv(args.output_dir, "whisper", rows)
+        _flush_combined_predictions(args.output_dir, combined, model_results, args.models)
 
     # ── w2vbert ───────────────────────────────────────────────────────────────
     if "w2vbert" in args.models:
@@ -1065,6 +1148,7 @@ def main() -> None:
             combined[fname]["rtfx_w2vbert"] = rtfx
         model_results["w2vbert"] = rows
         _write_model_csv(args.output_dir, "w2vbert", rows)
+        _flush_combined_predictions(args.output_dir, combined, model_results, args.models)
         del model
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
@@ -1074,7 +1158,9 @@ def main() -> None:
         print("\nNo models ran — nothing to write.")
         return
 
-    preds_path = _write_combined_predictions_json(args.output_dir, combined)
+    preds_path = _flush_combined_predictions(
+        args.output_dir, combined, model_results, args.models
+    )
 
     metrics = build_metrics_summary(
         model_results,

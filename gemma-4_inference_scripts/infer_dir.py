@@ -686,6 +686,20 @@ def _decode_w2vbert_ids(processor, pred_ids: np.ndarray) -> str:
     return processor.tokenizer.batch_decode(arr)[0].strip()
 
 
+def _w2vbert_batch_to_device(batch: dict, model, device: torch.device) -> dict:
+    model_dtype = next(model.parameters()).dtype
+    out = {}
+    for key, val in batch.items():
+        if not hasattr(val, "to"):
+            out[key] = val
+            continue
+        if val.is_floating_point():
+            out[key] = val.to(device=device, dtype=model_dtype)
+        else:
+            out[key] = val.to(device=device)
+    return out
+
+
 @torch.no_grad()
 def _transcribe_w2vbert_segment(
     model,
@@ -696,7 +710,7 @@ def _transcribe_w2vbert_segment(
 ) -> str:
     feat = _w2vbert_feat_row(processor, model_input_name, arr)
     batch = processor.pad([feat], padding=True, return_tensors="pt")
-    batch = {k: v.to(device) for k, v in batch.items() if hasattr(v, "to")}
+    batch = _w2vbert_batch_to_device(batch, model, device)
     logits = model(**batch).logits
     pred_ids = torch.argmax(logits, dim=-1).detach().cpu().numpy()
     return _decode_w2vbert_ids(processor, pred_ids)
@@ -715,10 +729,11 @@ def load_w2vbert_model(checkpoint: str, device: torch.device):
         raise RuntimeError("w2v-bert processor has no tokenizer; cannot decode CTC outputs.")
 
     model_input_name = _probe_w2vbert_input_name(processor)
-    dtype = torch.float16 if device.type == "cuda" else torch.float32
 
     print(f"Loading w2v-bert model: {ckpt}")
-    model = AutoModelForCTC.from_pretrained(str(ckpt), torch_dtype=dtype)
+    # Keep float32 weights (same as evaluate_asr_batch default); half-precision load
+    # breaks w2v-bert layer_norm when input_features stay float32.
+    model = AutoModelForCTC.from_pretrained(str(ckpt), torch_dtype=torch.float32)
     model = model.to(device).eval()
     print(f"Inference device: {device}  model_input_name={model_input_name}")
     return model, processor, model_input_name

@@ -692,11 +692,32 @@ def build_toml_from_base(base_dump: Path, bundle_staging: Path) -> Path:
         flags=re.DOTALL | re.MULTILINE,
     )
 
+    # Strip prefer_activation_type from the prefill_decode section ONLY.
+    # The community prefill_decode was exported as FP16; our finetuned replacement
+    # is dynamic_wi4_afp32 (FP32 activations).  Keeping fp16 hint causes the runtime
+    # to cast tensors to FP16, which produces garbage output from the FP32 model.
+    # vision_encoder is untouched (still community FP16 — correct for that section).
+    #
+    # IMPORTANT: use [^\n]* (not .*? with re.DOTALL) for the additional_metadata value.
+    # re.DOTALL + non-greedy .*? would expand across [[section]] boundaries and eat the
+    # entire vision block (vision_encoder + vision_adapter + end_of_vision) looking for
+    # the next "prefill_decode". [^\n]* stays on one line, so it only removes the single
+    # additional_metadata line immediately above model_type = "prefill_decode".
+    content = re.sub(
+        r"(\[\[section\]\]\n)"           # [[section]] header (no flags → . doesn't cross \n)
+        r"(additional_metadata[^\n]*\n)" # additional_metadata line (single line only)
+        r"(model_type\s*=\s*\"prefill_decode\")",  # immediately followed by model_type
+        r"\1\3",                          # drop the additional_metadata line
+        content,
+        # no re.DOTALL — keeps [^\n]* scoped to one line
+    )
+
     bundle_toml = bundle_staging / "bundle.toml"
     bundle_toml.write_text(content, encoding="utf-8")
     print(
-        f"[info] bundle.toml built from community model.toml "
-        f"(SP_Tokenizer + backend_constraint + additional_metadata preserved)"
+        "[info] bundle.toml built from community model.toml\n"
+        "       SP_Tokenizer + backend_constraint + audio/vision metadata preserved\n"
+        "       prefer_activation_type stripped from prefill_decode (FP32 export)"
     )
     print(f"\n[toml] {bundle_toml}\n{bundle_toml.read_text()}")
     return bundle_toml

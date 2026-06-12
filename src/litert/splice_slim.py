@@ -242,23 +242,43 @@ def _rel(path: Path, base: Path) -> str:
 
 
 def _infer_tflite_model_type(path: Path) -> str:
+    """Return the builder TOML model_type for a TFLite file.
+
+    litert-lm-peek names dump files as:
+        Section{N}_TFLiteModel_tf_lite_{type}.tflite
+
+    get_enum_from_tf_free_value() lowercases the TOML value and prepends
+    "tf_lite_", so the TOML model_type must be {type} in UPPERCASE.
+    We extract {type} directly from the filename for accuracy.
+    """
+    # Primary: extract from peek-generated filename (most reliable)
+    m = re.search(r"tf_lite_(\w+)", path.stem, re.I)
+    if m:
+        return m.group(1).upper()
+
+    # Fallback: keyword matching for files not following peek naming
     n = path.as_posix().lower()
+    if "per_layer_embedder" in n:
+        return "PER_LAYER_EMBEDDER"
     if "prefill_decode" in n or ("prefill" in n and "decode" in n):
-        return "prefill_decode"
-    if "embedder" in n:
-        return "embedder"
-    # Audio / vision encoders: use the builder TOML key.
-    # get_enum_from_tf_free_value() lowercases the value and prepends "tf_lite_",
-    # so "AUDIO_ENCODER_HW" → "tf_lite_audio_encoder_hw" = TfLiteModelType.TF_LITE_AUDIO_ENCODER_HW.
-    if "audio" in n:
+        return "PREFILL_DECODE"
+    if "mtp_drafter" in n:
+        return "MTP_DRAFTER"
+    if "audio_encoder_hw" in n:
         return "AUDIO_ENCODER_HW"
-    if "vision" in n:
-        return "VISION_ENCODER_HW"
-    if "prefill" in n:
-        return "prefill"
-    if "decode" in n:
-        return "decode"
-    return "prefill_decode"
+    if "audio_adapter" in n:
+        return "AUDIO_ADAPTER"
+    if "end_of_audio" in n:
+        return "END_OF_AUDIO"
+    if "vision_encoder" in n:
+        return "VISION_ENCODER"
+    if "vision_adapter" in n:
+        return "VISION_ADAPTER"
+    if "end_of_vision" in n:
+        return "END_OF_VISION"
+    if "embedder" in n:
+        return "EMBEDDER"
+    return "PREFILL_DECODE"
 
 
 def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
@@ -388,20 +408,10 @@ def write_bundle_toml(sections: list[BundleSection], toml_path: Path) -> None:
         elif st in ("SP_Tokenizer", "SpTokenizer"):
             lines += ["[[section]]", 'section_type = "SP_Tokenizer"', f'data_path = "{rel}"', ""]
         elif st == "TFLiteModel":
-            raw_mt = sec.model_type or "prefill_decode"
-            # Preserve exact casing for special keys (TF_LITE_AUDIO_ENCODER_HW,
-            # TF_LITE_VISION_ENCODER_HW); uppercase simple names like prefill_decode.
-            _EXACT_KEYS = {
-                "TF_LITE_AUDIO_ENCODER_HW",
-                "TF_LITE_VISION_ENCODER_HW",
-                "EMBEDDER",
-                "PREFILL_DECODE",
-                "PREFILL",
-                "DECODE",
-            }
-            mt_key = raw_mt if raw_mt in _EXACT_KEYS else raw_mt.upper()
-            if mt_key not in _EXACT_KEYS:
-                mt_key = mt_key  # pass through unknown keys as-is
+            # model_type is already in the correct TOML format from _infer_tflite_model_type().
+            # get_enum_from_tf_free_value() lowercases and prepends "tf_lite_", so we pass
+            # the UPPERCASE suffix (e.g. "AUDIO_ENCODER_HW" → "tf_lite_audio_encoder_hw").
+            mt_key = (sec.model_type or "PREFILL_DECODE").upper()
             lines += [
                 "[[section]]",
                 'section_type = "TFLiteModel"',

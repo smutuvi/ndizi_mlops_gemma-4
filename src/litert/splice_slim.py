@@ -353,13 +353,25 @@ def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
             add_section(BundleSection("HF_Tokenizer", p))
 
     # ── Pass 2: scan dump dir for anything the log missed ────────────────────
-    metadata_pbs = [
-        pb for pb in dump_dir.rglob("*.pb")
-        if "metadata" in pb.name.lower() or "llm" in pb.name.lower()
+    # LlmMetadata: peek dumps as LlmMetadataProto.pbtext (binary proto, .pbtext ext)
+    # or as legacy *.pb.
+    metadata_candidates = sorted(
+        list(dump_dir.rglob("*.pbtext")) + list(dump_dir.rglob("*.pb")),
+        key=lambda p: p.stat().st_size,
+        reverse=True,
+    )
+    metadata_candidates = [
+        p for p in metadata_candidates
+        if "metadata" in p.name.lower() or "llm" in p.name.lower()
     ]
-    if metadata_pbs:
-        add_section(BundleSection("LlmMetadata", max(metadata_pbs, key=lambda p: p.stat().st_size)))
+    if metadata_candidates:
+        add_section(BundleSection("LlmMetadata", metadata_candidates[0]))
 
+    # HF_Tokenizer: peek dumps as Section{N}_HF_Tokenizer_Zlib.zlib
+    for zlib in sorted(dump_dir.rglob("*HF_Tokenizer*.zlib")):
+        add_section(BundleSection("HF_Tokenizer_Zlib", zlib))
+
+    # Plain JSON tokenizer (older bundles)
     for tok in sorted(dump_dir.rglob("tokenizer.json")):
         add_section(BundleSection("HF_Tokenizer", tok))
 
@@ -373,8 +385,31 @@ def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
     if not sections:
         raise RuntimeError(f"No bundle sections inferred from {dump_dir}")
 
-    # ── Sanity check: warn if audio encoder is missing ───────────────────────
-    tflite_types = {s.model_type for s in sections if s.section_type == "TFLiteModel"}
+    # ── Reorder: LlmMetadata → Tokenizer → TFLiteModel (builder may be order-sensitive) ──
+    _ORDER = {"LlmMetadata": 0, "HF_Tokenizer_Zlib": 1, "HF_Tokenizer": 1,
+              "SP_Tokenizer": 1, "TFLiteModel": 2}
+    sections.sort(key=lambda s: _ORDER.get(s.section_type, 99))
+
+    # ── Sanity checks ────────────────────────────────────────────────────────
+    section_types = {s.section_type for s in sections}
+    tflite_types  = {s.model_type for s in sections if s.section_type == "TFLiteModel"}
+
+    if "LlmMetadata" not in section_types:
+        print(
+            "[WARN] No LlmMetadata section found — model will crash at load time!\n"
+            "       Peek should dump LlmMetadataProto.pbtext; check your dump dir."
+        )
+    else:
+        print("[info] LlmMetadata section present ✓")
+
+    if not section_types & {"HF_Tokenizer", "HF_Tokenizer_Zlib", "SP_Tokenizer"}:
+        print(
+            "[WARN] No tokenizer section found — model will crash at load time!\n"
+            "       Peek should dump *HF_Tokenizer*.zlib; check your dump dir."
+        )
+    else:
+        print("[info] Tokenizer section present ✓")
+
     if "AUDIO_ENCODER_HW" not in tflite_types:
         print(
             "[warn] No AUDIO_ENCODER_HW section found — ASR will fail at runtime.\n"
@@ -403,6 +438,8 @@ def write_bundle_toml(sections: list[BundleSection], toml_path: Path) -> None:
         st = sec.section_type
         if st == "LlmMetadata":
             lines += ["[[section]]", 'section_type = "LlmMetadata"', f'data_path = "{rel}"', ""]
+        elif st in ("HF_Tokenizer_Zlib", "HfTokenizerZlib"):
+            lines += ["[[section]]", 'section_type = "HF_Tokenizer_Zlib"', f'data_path = "{rel}"', ""]
         elif st in ("HF_Tokenizer", "HfTokenizer", "HFTokenizer"):
             lines += ["[[section]]", 'section_type = "HF_Tokenizer"', f'data_path = "{rel}"', ""]
         elif st in ("SP_Tokenizer", "SpTokenizer"):

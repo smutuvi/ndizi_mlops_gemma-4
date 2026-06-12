@@ -552,54 +552,94 @@ def _ensure_tokenizer(bundle_dir: Path, merged_model: str, ft_dump: Path | None 
     """Place tokenizer.json in bundle_dir so inventory_from_dump() can include it.
 
     Tries in order:
-      1. Already exists in bundle_dir → nothing to do.
-      2. Decompress *HF_Tokenizer*.zlib from bundle_dir or ft_dump (tries
-         zlib, gzip, and raw deflate — peek naming convention says "Zlib" but
-         the actual compression may vary across builder versions).
-      3. Download tokenizer.json from the merged model on HuggingFace Hub.
+      1. Already present in bundle_dir.
+      2. Copy from locally-saved merged model directory (work_dir/merged_model/).
+      3. Copy from finetuned export dir (work_dir/finetuned_export/**).
+      4. Decompress *HF_Tokenizer*.zlib from bundle_dir or ft_dump (tries
+         zlib, gzip, raw deflate, and zip).
+      5. Download tokenizer.json from the merged model on HuggingFace Hub.
     """
     import gzip as _gzip
     import zlib as _zlib
 
     tok_dst = bundle_dir / "tokenizer.json"
+    work_dir = bundle_dir.parent  # bundle_dir = work_dir/bundle_staging
+
     if tok_dst.exists():
-        print(f"[info] tokenizer.json already present in bundle_dir")
+        print(f"[tok] tokenizer.json already present ({tok_dst.stat().st_size / 1e3:.0f} KB)")
         return
 
-    # Candidates: bundle_dir first, then ft_dump
+    def _copy(src: Path, label: str) -> bool:
+        if src.exists() and src.stat().st_size > 0:
+            shutil.copy2(src, tok_dst)
+            print(f"[tok] Copied tokenizer.json from {label} ({tok_dst.stat().st_size / 1e3:.0f} KB)")
+            return True
+        return False
+
+    # 1. Locally merged model (written by merge_lora_adapter)
+    if _copy(work_dir / "merged_model" / "tokenizer.json", "merged_model"):
+        return
+
+    # 2. Finetuned export directory (litert_torch export may keep tokenizer alongside .litertlm)
+    for p in sorted((work_dir / "finetuned_export").rglob("tokenizer.json")):
+        if _copy(p, f"finetuned_export/{p.name}"):
+            return
+
+    # 3. Decompress *HF_Tokenizer*.zlib from bundle_dir or ft_dump
     search_dirs = [bundle_dir] + ([ft_dump] if ft_dump and ft_dump.exists() else [])
     for sdir in search_dirs:
         for zp in sorted(sdir.rglob("*HF_Tokenizer*.zlib")):
+            print(f"[tok] Trying to decompress {zp} ({zp.stat().st_size / 1e3:.0f} KB) …")
             raw_data = zp.read_bytes()
-            for decompress, label in [
+
+            # Try standard decompression methods
+            for decompress_fn, label in [
                 (_zlib.decompress, "zlib"),
                 (_gzip.decompress, "gzip"),
                 (lambda d: _zlib.decompress(d, -15), "deflate"),
             ]:
                 try:
-                    data = decompress(raw_data)
+                    data = decompress_fn(raw_data)
                     tok_dst.write_bytes(data)
-                    print(
-                        f"[info] Decompressed {zp.name} ({label}) → tokenizer.json "
-                        f"({len(data) / 1e3:.1f} KB)"
-                    )
+                    print(f"[tok] Decompressed ({label}) → tokenizer.json ({len(data) / 1e3:.0f} KB)")
                     return
                 except Exception:
                     pass
-            print(f"[warn] Could not decompress {zp} — will try HF download")
 
-    # Fall back: download directly from the merged model repo
-    print(f"[info] Downloading tokenizer.json from {merged_model} …")
+            # Try zip (maybe it's a zip of tokenizer files)
+            try:
+                import io
+                import zipfile
+                with zipfile.ZipFile(io.BytesIO(raw_data)) as zf:
+                    names = zf.namelist()
+                    print(f"[tok] Zip contents: {names}")
+                    tok_entry = next((n for n in names if n.endswith("tokenizer.json")), None)
+                    if tok_entry:
+                        tok_dst.write_bytes(zf.read(tok_entry))
+                        print(f"[tok] Extracted {tok_entry} from zip ({tok_dst.stat().st_size / 1e3:.0f} KB)")
+                        return
+            except Exception:
+                pass
+
+            print(f"[tok-warn] Could not decompress {zp.name} — none of zlib/gzip/deflate/zip worked")
+            print(f"[tok-warn] First 16 bytes (hex): {raw_data[:16].hex()}")
+
+    # 4. Download from HuggingFace
+    print(f"[tok] Downloading tokenizer.json from {merged_model} …")
     try:
         from huggingface_hub import hf_hub_download
         src = Path(hf_hub_download(merged_model, "tokenizer.json"))
         shutil.copy2(src, tok_dst)
-        print(f"[info] tokenizer.json downloaded ({tok_dst.stat().st_size / 1e6:.1f} MB)")
+        print(f"[tok] Downloaded tokenizer.json ({tok_dst.stat().st_size / 1e6:.1f} MB)")
+        return
     except Exception as e:
-        print(
-            f"[WARN] Could not obtain tokenizer.json: {e}\n"
-            "       The bundle will be missing a tokenizer and will crash at runtime."
-        )
+        print(f"[tok-warn] HF download failed: {e}")
+
+    print(
+        "[tok-FATAL] Could not obtain tokenizer.json by any method.\n"
+        "            The bundle will be missing a tokenizer and will crash at runtime.\n"
+        f"            Manually copy tokenizer.json into: {bundle_dir}"
+    )
 
 
 def build_slim_bundle(

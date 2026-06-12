@@ -94,7 +94,6 @@ def merge_lora(
     token: str | None,
 ) -> Path:
     import torch
-    from peft import PeftModel
     from transformers import AutoModelForMultimodalLM, AutoProcessor
 
     hub_kw = {"token": token} if token else {}
@@ -118,7 +117,9 @@ def merge_lora(
     )
 
     print("  Applying LoRA adapter...")
-    model = PeftModel.from_pretrained(base, lora_model_id, token=token)
+    from gemma4_peft_load import load_gemma4_peft_adapter
+
+    model = load_gemma4_peft_adapter(base, lora_model_id, token=token)
 
     print("  Merging weights (merge_and_unload)...")
     model = model.merge_and_unload()

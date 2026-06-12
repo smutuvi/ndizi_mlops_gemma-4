@@ -23,9 +23,14 @@ from transformers import BitsAndBytesConfig
 logger = logging.getLogger(__name__)
 
 # LM decoder only — excludes audio_tower / vision_tower ClippableLinear homonyms.
+# Legacy regex (over-declares k_proj/v_proj on KV-shared layers). Prefer build_kv_aware_lm_lora_regex().
 DEFAULT_GEMMA4_LM_LORA_TARGETS = (
     r"^(?=.*\.language_model\.)(?!.*\.(?:audio_tower|vision_tower)\.).*"
     r"\.(?:self_attn|mlp)\.(?:q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$"
+)
+
+_LM_LORA_PREFIX = (
+    r"^(?=.*\.language_model\.)(?!.*\.(?:audio_tower|vision_tower)\.).*"
 )
 
 # Keep audio (and lm_head) in fp16/bf16 under 4-bit QLoRA — Gemma4ClippableLinear uses
@@ -106,7 +111,142 @@ def patch_masked_scatter_dtype_compat() -> None:
     logger.info("Patched torch.Tensor.masked_scatter for dtype alignment (Gemma 4 QLoRA)")
 
 
+def _get_num_kv_shared_layers(model: Any) -> int:
+    """Gemma 4 E2B/E4B: last N decoder layers share K/V and omit k_proj/v_proj."""
+    config = getattr(model, "config", None)
+    if config is None:
+        return 0
+    candidates = [config, getattr(config, "text_config", None)]
+    for cfg in candidates:
+        if cfg is None:
+            continue
+        n = getattr(cfg, "num_kv_shared_layers", None)
+        if n is not None:
+            return int(n)
+    return 0
+
+
+def _last_layer_with_kv_proj(model: Any) -> int | None:
+    total = _count_decoder_layers(model)
+    num_kv = _get_num_kv_shared_layers(model)
+    if num_kv <= 0:
+        return total - 1
+    return total - num_kv - 1
+
+
+def build_kv_aware_lm_lora_regex(model: Any, *, layer_filter: str | None = None) -> str:
+    """
+    LoRA regex aligned with Gemma 4 module layout.
+
+    q_proj/o_proj and MLP LoRA apply on all target layers; k_proj/v_proj only on layers
+    that actually exist (non-KV-shared). Tail-only configs on KV-shared layers get no k/v.
+    """
+    total = _count_decoder_layers(model)
+    last_kv = _last_layer_with_kv_proj(model)
+
+    if layer_filter:
+        allowed = {int(x) for x in layer_filter.split("|")}
+    else:
+        allowed = set(range(total))
+
+    all_layers = sorted(allowed)
+    kv_layers = sorted(i for i in all_layers if last_kv is not None and i <= last_kv)
+    all_indices = "|".join(str(i) for i in all_layers)
+    kv_indices = "|".join(str(i) for i in kv_layers)
+
+    part_all = (
+        rf"{_LM_LORA_PREFIX}(?=.*\.layers\.({all_indices})\.).*"
+        r"\.(?:self_attn\.(?:q_proj|o_proj)|mlp\.(?:gate_proj|up_proj|down_proj))$"
+    )
+    if not kv_indices:
+        if last_kv is not None and last_kv < total - 1:
+            logger.info(
+                "KV-aware LoRA: skipping k_proj/v_proj (filter layers %s are KV-shared)",
+                all_indices,
+            )
+        return part_all
+
+    part_kv = (
+        rf"{_LM_LORA_PREFIX}(?=.*\.layers\.({kv_indices})\.).*"
+        r"\.self_attn\.(?:k_proj|v_proj)$"
+    )
+    if last_kv is not None and last_kv < total - 1:
+        logger.info(
+            "KV-aware LoRA: k_proj/v_proj on layers 0–%d; layers %d–%d are KV-shared",
+            last_kv,
+            last_kv + 1,
+            total - 1,
+        )
+    return f"(?:{part_all}|{part_kv})"
+
+
+def _extract_layer_filter_from_targets(target_modules: str | list[str]) -> str | None:
+    if not isinstance(target_modules, str):
+        return None
+    m = re.search(r"\.layers\.\(([^)]+)\)", target_modules)
+    return m.group(1) if m else None
+
+
+def adapter_config_needs_kv_patch(target_modules: str | list[str] | None) -> bool:
+    if not target_modules:
+        return False
+    if isinstance(target_modules, list):
+        return "k_proj" in target_modules or "v_proj" in target_modules
+    if "k_proj" not in target_modules and "v_proj" not in target_modules:
+        return False
+    # Legacy full-stack regex declares k/v on every layer.
+    return bool(re.search(r"self_attn\.\(?:q_proj\|k_proj\|v_proj\|o_proj\)", target_modules))
+
+
+def patch_peft_config_for_kv_shared(peft_config: Any, model: Any) -> Any:
+    """Align adapter_config target_modules with modules that exist in the base model."""
+    targets = peft_config.target_modules
+    if not adapter_config_needs_kv_patch(targets):
+        return peft_config
+    layer_filter = _extract_layer_filter_from_targets(targets)
+    patched = build_kv_aware_lm_lora_regex(model, layer_filter=layer_filter)
+    if patched != targets:
+        logger.info("Patched PEFT target_modules for Gemma 4 KV-shared layers")
+        peft_config.target_modules = patched
+    return peft_config
+
+
+def rewrite_adapter_config_for_kv_shared(adapter_dir: Path | str, model: Any) -> bool:
+    """Fix adapter_config.json on disk after save (or before Hub publish). Returns True if rewritten."""
+    adapter_dir = Path(adapter_dir)
+    cfg_path = adapter_dir / "adapter_config.json"
+    if not cfg_path.is_file():
+        return False
+    data = json.loads(cfg_path.read_text(encoding="utf-8"))
+    targets = data.get("target_modules")
+    if not adapter_config_needs_kv_patch(targets):
+        return False
+    layer_filter = _extract_layer_filter_from_targets(targets) if isinstance(targets, str) else None
+    data["target_modules"] = build_kv_aware_lm_lora_regex(model, layer_filter=layer_filter)
+    cfg_path.write_text(json.dumps(data, indent=2, ensure_ascii=False) + "\n", encoding="utf-8")
+    logger.info("Rewrote %s for Gemma 4 KV-shared layers", cfg_path)
+    return True
+
+
+def load_gemma4_peft_adapter(base_model: Any, adapter_path: Path | str, **kwargs: Any) -> Any:
+    """Load a Gemma 4 LoRA adapter without missing-key warnings on KV-shared layers."""
+    from peft import PeftConfig, PeftModel
+
+    adapter_path = str(adapter_path)
+    cfg_kw = {k: v for k, v in kwargs.items() if k in ("token", "revision", "cache_dir", "subfolder")}
+    peft_config = PeftConfig.from_pretrained(adapter_path, **cfg_kw)
+    peft_config = patch_peft_config_for_kv_shared(peft_config, base_model)
+    load_kw = {k: v for k, v in kwargs.items() if k not in cfg_kw}
+    return PeftModel.from_pretrained(
+        base_model,
+        adapter_path,
+        config=peft_config,
+        **load_kw,
+    )
+
+
 def build_gemma4_lora_config(
+    model: Any | None = None,
     *,
     r: int = 32,
     lora_alpha: int = 64,
@@ -115,7 +255,14 @@ def build_gemma4_lora_config(
     modules_to_save: list[str] | None = None,
 ) -> LoraConfig:
     if target_modules is None:
-        target_modules = DEFAULT_GEMMA4_LM_LORA_TARGETS
+        if model is not None:
+            target_modules = build_kv_aware_lm_lora_regex(model)
+        else:
+            logger.warning(
+                "build_gemma4_lora_config without model uses legacy regex; "
+                "pass model= for KV-shared-safe targets"
+            )
+            target_modules = DEFAULT_GEMMA4_LM_LORA_TARGETS
     if modules_to_save is None:
         modules_to_save = ["audio_projector", "multi_modal_projector"]
     return LoraConfig(
@@ -161,11 +308,7 @@ def infer_lm_lora_regex_from_model(model: Any) -> str:
         if "audio_tower" in name or "vision_tower" in name:
             continue
         logger.info("Inferred LoRA targets using decoder layer pattern (sample: %s)", name)
-        return (
-            r"^(?!.*(?:audio_tower|vision_tower)).*\.layers\.\d+\."
-            r"(?:self_attn\.(?:q_proj|k_proj|v_proj|o_proj)|"
-            r"mlp\.(?:gate_proj|up_proj|down_proj))$"
-        )
+        return build_kv_aware_lm_lora_regex(model)
     raise RuntimeError("Could not infer language-model LoRA targets from model.named_modules()")
 
 
@@ -175,6 +318,7 @@ def apply_gemma4_lora(model: Any, lora_config: LoraConfig, *, debug_targets: boo
     if n == 0 and isinstance(targets, str):
         inferred = infer_lm_lora_regex_from_model(model)
         lora_config = build_gemma4_lora_config(
+            model=model,
             r=lora_config.r,
             lora_alpha=lora_config.lora_alpha,
             lora_dropout=lora_config.lora_dropout,
@@ -306,11 +450,17 @@ def load_projector_checkpoint(model: Any, adapter_dir: Path | str) -> Any:
 # ── asr_moderate: tail-LoRA on last N decoder layers + full projector save ────
 
 def _count_decoder_layers(model: Any) -> int:
+    patterns = (
+        re.compile(r"\.language_model\.layers\.(\d+)\."),
+        re.compile(r"\.language_model\.model\.layers\.(\d+)\."),
+    )
     max_idx = -1
     for name, _ in model.named_modules():
-        m = re.search(r"language_model\.model\.layers\.(\d+)\.", name)
-        if m:
-            max_idx = max(max_idx, int(m.group(1)))
+        for pat in patterns:
+            m = pat.search(name)
+            if m:
+                max_idx = max(max_idx, int(m.group(1)))
+                break
     if max_idx < 0:
         raise RuntimeError("Could not determine decoder layer count from model.named_modules()")
     return max_idx + 1
@@ -328,12 +478,7 @@ def build_asr_moderate_lora_config(
     total = _count_decoder_layers(model)
     first_tail = max(0, total - num_tail_layers)
     tail_indices = "|".join(str(i) for i in range(first_tail, total))
-    target_regex = (
-        r"^(?=.*\.language_model\.)"
-        rf"(?=.*\.layers\.({tail_indices})\.).*"
-        r"\.(?:self_attn|mlp)\."
-        r"(?:q_proj|k_proj|v_proj|o_proj|gate_proj|up_proj|down_proj)$"
-    )
+    target_regex = build_kv_aware_lm_lora_regex(model, layer_filter=tail_indices)
     logger.info(
         "[asr_moderate] Tail LoRA: layers %d–%d of %d (r=%d, alpha=%d)",
         first_tail, total - 1, total, r, lora_alpha,

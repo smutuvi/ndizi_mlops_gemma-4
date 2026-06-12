@@ -6,10 +6,13 @@ from pathlib import Path
 
 import torch
 from datasets import load_from_disk
-from peft import PeftModel
 from transformers import AutoModelForMultimodalLM, AutoProcessor
 
-from src.models.gemma4_lora import is_projector_only_checkpoint, load_projector_checkpoint
+from src.models.gemma4_lora import (
+    is_projector_only_checkpoint,
+    load_gemma4_peft_adapter,
+    load_projector_checkpoint,
+)
 
 from src.eval.eval_outputs import (
     build_prediction_rows,
@@ -59,7 +62,7 @@ def load_finetuned_gemma(checkpoint_dir: Path | str | None = None, *, fp16: bool
     if is_projector_only_checkpoint(adapter):
         model = load_projector_checkpoint(base, adapter).eval()
     else:
-        model = PeftModel.from_pretrained(base, str(adapter)).eval()
+        model = load_gemma4_peft_adapter(base, adapter).eval()
     return model, processor, adapter
 
 

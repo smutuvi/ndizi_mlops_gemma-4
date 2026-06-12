@@ -19,7 +19,6 @@ from pathlib import Path
 import numpy as np
 import torch
 from datasets import Audio, load_dataset
-from peft import PeftModel
 from scipy.signal import resample_poly
 from tqdm.auto import tqdm
 from transformers import AutoModelForMultimodalLM, AutoProcessor
@@ -264,7 +263,9 @@ def load_model(dtype: torch.dtype, token: str | None):
         attn_implementation="sdpa",
         **hub_kw,
     )
-    model = PeftModel.from_pretrained(base, ADAPTER_REPO, token=token).eval()
+    from gemma4_peft_load import load_gemma4_peft_adapter
+
+    model = load_gemma4_peft_adapter(base, ADAPTER_REPO, token=token).eval()
     return model, processor, f"{BASE_MODEL_ID} + {ADAPTER_REPO}"
 
 

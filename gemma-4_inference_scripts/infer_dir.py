@@ -438,8 +438,9 @@ def load_merged_model(dtype: torch.dtype, token: str | None, *, device_map_mode:
 
 
 def load_lora_model(dtype: torch.dtype, token: str | None):
-    from peft import PeftModel
     from transformers import AutoModelForMultimodalLM, AutoProcessor
+
+    from gemma4_peft_load import load_gemma4_peft_adapter
 
     hub_kw = {"token": token} if token else {}
     print(f"Loading processor: {BASE_MODEL_ID}")
@@ -453,7 +454,7 @@ def load_lora_model(dtype: torch.dtype, token: str | None):
         attn_implementation="sdpa",
         **hub_kw,
     )
-    model = PeftModel.from_pretrained(base, ADAPTER_REPO, token=token).eval()
+    model = load_gemma4_peft_adapter(base, ADAPTER_REPO, token=token).eval()
     device = resolve_torch_device()
     print(f"Inference device: {device}  (device_map=auto)")
     return model, processor, device

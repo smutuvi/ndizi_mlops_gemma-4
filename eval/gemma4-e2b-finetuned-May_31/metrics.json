@@ -1,0 +1,76 @@
+{
+  "text_normalize": "jiwer_default",
+  "pooled": {
+    "wer": 0.4207877305856936,
+    "cer": 0.17625353497218324,
+    "n_utterances": 1041,
+    "wer_normalized": 0.3808720045644732,
+    "cer_normalized": 0.1536216299254935
+  },
+  "per_set": {
+    "smutuvi/ndizi-1:test": {
+      "wer": 0.46669156086631813,
+      "cer": 0.19830182457683007,
+      "n": 690,
+      "dropped_long": 0,
+      "chunk_length_s": 30.0,
+      "wer_normalized": 0.4259314679036361,
+      "cer_normalized": 0.17380772639249023
+    },
+    "smutuvi/ndizi-1-2025:test": {
+      "wer": 0.34065575907698326,
+      "cer": 0.13564965690342692,
+      "n": 351,
+      "dropped_long": 0,
+      "chunk_length_s": 30.0,
+      "wer_normalized": 0.30230889642577613,
+      "cer_normalized": 0.11612423329715756
+    }
+  },
+  "splits": {
+    "text_normalize": "jiwer_default",
+    "smutuvi/ndizi-1:test": {
+      "pooled": {
+        "wer": 0.46669156086631813,
+        "cer": 0.19830182457683007,
+        "n": 690,
+        "normalize": "none"
+      },
+      "smutuvi/ndizi-1": {
+        "wer": 0.46669156086631813,
+        "cer": 0.19830182457683007,
+        "n": 690,
+        "normalize": "none"
+      }
+    },
+    "smutuvi/ndizi-1-2025:test": {
+      "pooled": {
+        "wer": 0.34065575907698326,
+        "cer": 0.13564965690342692,
+        "n": 351,
+        "normalize": "none"
+      },
+      "smutuvi/ndizi-1-2025": {
+        "wer": 0.34065575907698326,
+        "cer": 0.13564965690342692,
+        "n": 351,
+        "normalize": "none"
+      }
+    }
+  },
+  "run_info": {
+    "checkpoint": "/home/smutuvi/ndizi_mlops_gemma-4/artifacts/checkpoints/best",
+    "base_model_id": "google/gemma-4-E2B-it",
+    "test_datasets": [
+      "smutuvi/ndizi-1:test",
+      "smutuvi/ndizi-1-2025:test"
+    ],
+    "output_dir": "/home/smutuvi/ndizi_mlops_gemma-4/eval/gemma4-e2b-finetuned-test",
+    "batch_size": 4,
+    "chunk_length_s": 30.0,
+    "stride_length_s": null,
+    "max_audio_seconds": null,
+    "fp16": false,
+    "max_samples": null
+  }
+}

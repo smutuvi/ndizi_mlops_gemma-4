@@ -19,6 +19,7 @@ from src.models.gemma4_lora import (
     freeze_lm_decoder,
     patch_clippable_linear_for_peft,
     patch_masked_scatter_dtype_compat,
+    rewrite_adapter_config_for_kv_shared,
     save_projector_checkpoint,
 )
 from src.training.collator import GemmaASRCollator
@@ -127,7 +128,7 @@ def run_train(cli_args) -> None:
         else:
             # asr_max — existing full-decoder LoRA behaviour
             lora_target = getattr(cli_args, "lora_target_modules", None)
-            lora = build_gemma4_lora_config(target_modules=lora_target)
+            lora = build_gemma4_lora_config(model, target_modules=lora_target)
 
         model = apply_gemma4_lora(model, lora, debug_targets=bool(getattr(cli_args, "debug_lora_targets", False)))
         model.print_trainable_parameters()
@@ -231,4 +232,6 @@ def run_train(cli_args) -> None:
     else:
         trainer.save_model(str(out_dir))
         processor.save_pretrained(str(out_dir))
+        if rewrite_adapter_config_for_kv_shared(out_dir, trainer.model):
+            print("[train] Patched adapter_config.json for Gemma 4 KV-shared layers")
         print("Saved LoRA adapter to", out_dir)

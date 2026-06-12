@@ -10,10 +10,14 @@ from typing import Any
 
 import torch
 from huggingface_hub import HfApi
-from peft import PeftModel
 from transformers import AutoModelForMultimodalLM, AutoProcessor
 
-from src.models.gemma4_lora import is_projector_only_checkpoint, load_projector_checkpoint
+from src.models.gemma4_lora import (
+    is_projector_only_checkpoint,
+    load_gemma4_peft_adapter,
+    load_projector_checkpoint,
+    rewrite_adapter_config_for_kv_shared,
+)
 from src.utils.constants import SRC_DATASETS
 from src.utils.paths import (
     ARTIFACTS_DIR,
@@ -225,7 +229,7 @@ def run_publish(args) -> None:
             print("[publish] asr_safe checkpoint detected — loading projector weights onto base model")
             merged = load_projector_checkpoint(base, adapter_dir)
         else:
-            merged = PeftModel.from_pretrained(base, str(adapter_dir))
+            merged = load_gemma4_peft_adapter(base, str(adapter_dir))
             merged = merged.merge_and_unload()
         merged.save_pretrained(str(MERGED_LOCAL), safe_serialization=True)
         processor.save_pretrained(str(MERGED_LOCAL))

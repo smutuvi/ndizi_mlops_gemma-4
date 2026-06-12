@@ -15,6 +15,8 @@ from huggingface_hub import HfApi, hf_hub_download
 BASE_LITERT_REPO = "litert-community/gemma-4-E2B-it-litert-lm"
 BASE_LITERT_FILE = "gemma-4-E2B-it.litertlm"
 
+DEFAULT_BASE_MODEL = "google/gemma-4-E2B-it"
+DEFAULT_ADAPTER = "smutuvi/gemma-4-e2b-sw-asr-ndizi"
 DEFAULT_MERGED_MODEL = "smutuvi/gemma-4-e2b-sw-asr-ndizi-merged"
 DEFAULT_HUB_REPO = "smutuvi/gemma-4-e2b-sw-asr-ndizi-litert-lm-slim"
 DEFAULT_OUTPUT_NAME = "gemma-4-e2b-sw-asr-ndizi-slim.litertlm"
@@ -55,6 +57,82 @@ def _which(name: str) -> str:
             "  # peek/builder CLIs: litert-lm-peek, litert-lm-builder"
         )
     return path
+
+
+def merge_lora_adapter(
+    base_model: str,
+    adapter: str,
+    output_dir: Path,
+    *,
+    token: str | None = None,
+) -> Path:
+    """Merge a LoRA/PEFT adapter into the base model and save the result.
+
+    Skips if output_dir already contains model weights (delete to re-run).
+
+    Args:
+        base_model: HF repo ID or local path for the base model.
+        adapter:    HF repo ID or local path for the LoRA adapter.
+        output_dir: Where to save the merged model.
+        token:      HuggingFace token (needed for gated models like Gemma).
+
+    Returns:
+        output_dir (Path)
+    """
+    import shutil as _shutil
+
+    output_dir = Path(output_dir)
+    weight_files = list(output_dir.glob("*.safetensors")) + list(output_dir.glob("pytorch_model*.bin"))
+    if weight_files:
+        print(f"[merge] {output_dir} already has weights — skipping merge (delete to redo).")
+        return output_dir
+
+    print(f"[merge] Loading base model: {base_model}")
+    import torch
+    from peft import PeftModel
+    from transformers import AutoModelForCausalLM, AutoProcessor, AutoTokenizer
+
+    model = AutoModelForCausalLM.from_pretrained(
+        base_model,
+        torch_dtype=torch.float16,
+        device_map="auto",
+        token=token,
+    )
+
+    print(f"[merge] Applying LoRA adapter: {adapter}")
+    model = PeftModel.from_pretrained(model, adapter, token=token)
+
+    print("[merge] Merging adapter weights into base model …")
+    model = model.merge_and_unload()
+
+    output_dir.mkdir(parents=True, exist_ok=True)
+    print(f"[merge] Saving merged model → {output_dir}")
+    model.save_pretrained(output_dir, safe_serialization=True)
+
+    print("[merge] Saving tokenizer …")
+    AutoTokenizer.from_pretrained(base_model, token=token).save_pretrained(output_dir)
+
+    # Copy processor / preprocessor configs (needed for audio/vision pipelines).
+    print("[merge] Copying processor configs from base model …")
+    try:
+        from huggingface_hub import hf_hub_download
+
+        for fname in [
+            "preprocessor_config.json",
+            "processor_config.json",
+            "special_tokens_map.json",
+            "generation_config.json",
+        ]:
+            try:
+                src = hf_hub_download(base_model, fname, token=token)
+                _shutil.copy(src, output_dir / fname)
+            except Exception:
+                pass
+    except Exception:
+        pass
+
+    print(f"[merge] ✓ Merge complete → {output_dir}")
+    return output_dir
 
 
 def download_base_litertlm(dest_dir: Path) -> Path:
@@ -161,6 +239,11 @@ def _infer_tflite_model_type(path: Path) -> str:
         return "prefill_decode"
     if "embedder" in n:
         return "embedder"
+    # Audio / vision encoders must use the exact key LiteRT-LM expects.
+    if "audio" in n:
+        return "TF_LITE_AUDIO_ENCODER_HW"
+    if "vision" in n:
+        return "TF_LITE_VISION_ENCODER_HW"
     if "prefill" in n:
         return "prefill"
     if "decode" in n:
@@ -169,19 +252,13 @@ def _infer_tflite_model_type(path: Path) -> str:
 
 
 def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
-    """Build section list from peek log + unpacked files (peek log gives order when parseable)."""
+    """Build section list from peek log + unpacked files.
+
+    The peek log is parsed line-by-line; when a model_type appears near a
+    data_path the two are associated so we don't have to guess from filenames.
+    Filename-based inference is the fallback.
+    """
     sections: list[BundleSection] = []
-
-    mentioned: list[Path] = []
-    for line in peek_log.splitlines():
-        m = re.search(r"(?:data_path|path|file)\s*[:=]\s*['\"]?([^\s'\"]+\.(?:tflite|pb|json|model))", line, re.I)
-        if m:
-            p = dump_dir / m.group(1)
-            if not p.is_file():
-                p = next(dump_dir.rglob(Path(m.group(1)).name), None)
-            if p and p.is_file():
-                mentioned.append(p.resolve())
-
     seen: set[Path] = set()
 
     def add_section(sec: BundleSection) -> None:
@@ -191,28 +268,67 @@ def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
         seen.add(key)
         sections.append(sec)
 
-    for path in mentioned:
-        if path.suffix == ".pb":
-            add_section(BundleSection("LlmMetadata", path))
-        elif path.suffix == ".tflite":
-            add_section(
-                BundleSection(
-                    "TFLiteModel",
-                    path,
-                    model_type=_infer_tflite_model_type(path),
-                )
-            )
-        elif path.name == "tokenizer.json":
-            add_section(BundleSection("HF_Tokenizer", path))
+    def resolve_path(raw: str) -> Path | None:
+        p = dump_dir / raw
+        if p.is_file():
+            return p.resolve()
+        hit = next(dump_dir.rglob(Path(raw).name), None)
+        return hit.resolve() if hit else None
 
+    # ── Pass 1: parse peek log, capturing model_type from context ────────────
+    # The peek log groups info about each section across a few lines.
+    # We scan with a small sliding context window so that a model_type line
+    # appearing before/after the data_path line is still associated correctly.
+    _MODEL_TYPE_RE = re.compile(r"model[_\s]type\s*[:=]\s*['\"]?(\w+)['\"]?", re.I)
+    _DATA_PATH_RE  = re.compile(
+        r"(?:data_path|path|file)\s*[:=]\s*['\"]?([^\s'\"]+\.(?:tflite|pb|json|model))", re.I
+    )
+
+    lines = peek_log.splitlines()
+    # Build list of (line_index, model_type) and (line_index, data_path) matches,
+    # then pair them by proximity.
+    mt_hits: list[tuple[int, str]] = []
+    dp_hits: list[tuple[int, str]] = []
+    for i, line in enumerate(lines):
+        mt = _MODEL_TYPE_RE.search(line)
+        if mt:
+            mt_hits.append((i, mt.group(1)))
+        dp = _DATA_PATH_RE.search(line)
+        if dp:
+            dp_hits.append((i, dp.group(1)))
+
+    # For each data_path hit find the nearest preceding model_type (within 5 lines).
+    used_mt: set[int] = set()
+    for dp_idx, raw_path in dp_hits:
+        p = resolve_path(raw_path)
+        if p is None:
+            continue
+        # Find closest model_type before this line.
+        best_mt: str | None = None
+        best_dist = 6
+        for mt_idx, mt_val in mt_hits:
+            dist = dp_idx - mt_idx
+            if 0 <= dist < best_dist and mt_idx not in used_mt:
+                best_dist = dist
+                best_mt = mt_val
+        if best_mt and best_dist < 6:
+            used_mt.add(mt_hits[[i for i, (mi, _) in enumerate(mt_hits) if mi == dp_idx - best_dist][0]][0])
+
+        if p.suffix == ".pb":
+            add_section(BundleSection("LlmMetadata", p))
+        elif p.suffix == ".tflite":
+            mt = best_mt or _infer_tflite_model_type(p)
+            add_section(BundleSection("TFLiteModel", p, model_type=mt))
+        elif p.name == "tokenizer.json":
+            add_section(BundleSection("HF_Tokenizer", p))
+
+    # ── Pass 2: scan dump dir for anything the log missed ────────────────────
     metadata_pbs = [
-        pb
-        for pb in dump_dir.rglob("*.pb")
+        pb for pb in dump_dir.rglob("*.pb")
         if "metadata" in pb.name.lower() or "llm" in pb.name.lower()
     ]
     if metadata_pbs:
-        llm_pb = max(metadata_pbs, key=lambda p: p.stat().st_size)
-        add_section(BundleSection("LlmMetadata", llm_pb))
+        add_section(BundleSection("LlmMetadata", max(metadata_pbs, key=lambda p: p.stat().st_size)))
 
     for tok in sorted(dump_dir.rglob("tokenizer.json")):
         add_section(BundleSection("HF_Tokenizer", tok))
@@ -222,16 +338,21 @@ def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
             add_section(BundleSection("SP_Tokenizer", sp))
 
     for tflite in sorted(dump_dir.rglob("*.tflite")):
-        add_section(
-            BundleSection(
-                "TFLiteModel",
-                tflite,
-                model_type=_infer_tflite_model_type(tflite),
-            )
-        )
+        add_section(BundleSection("TFLiteModel", tflite, model_type=_infer_tflite_model_type(tflite)))
 
     if not sections:
         raise RuntimeError(f"No bundle sections inferred from {dump_dir}")
+
+    # ── Sanity check: warn if audio encoder is missing ───────────────────────
+    tflite_types = {s.model_type for s in sections if s.section_type == "TFLiteModel"}
+    if "TF_LITE_AUDIO_ENCODER_HW" not in tflite_types:
+        print(
+            "[warn] No TF_LITE_AUDIO_ENCODER_HW section found — ASR will fail at runtime.\n"
+            "       Check that the base community bundle contains an audio encoder TFLite."
+        )
+    else:
+        print("[info] Audio encoder section present ✓")
+
     return sections
 
 
@@ -257,8 +378,20 @@ def write_bundle_toml(sections: list[BundleSection], toml_path: Path) -> None:
         elif st in ("SP_Tokenizer", "SpTokenizer"):
             lines += ["[[section]]", 'section_type = "SP_Tokenizer"', f'data_path = "{rel}"', ""]
         elif st == "TFLiteModel":
-            mt = (sec.model_type or "prefill_decode").upper()
-            mt_key = "PREFILL_DECODE" if mt == "PREFILL_DECODE" else mt
+            raw_mt = sec.model_type or "prefill_decode"
+            # Preserve exact casing for special keys (TF_LITE_AUDIO_ENCODER_HW,
+            # TF_LITE_VISION_ENCODER_HW); uppercase simple names like prefill_decode.
+            _EXACT_KEYS = {
+                "TF_LITE_AUDIO_ENCODER_HW",
+                "TF_LITE_VISION_ENCODER_HW",
+                "EMBEDDER",
+                "PREFILL_DECODE",
+                "PREFILL",
+                "DECODE",
+            }
+            mt_key = raw_mt if raw_mt in _EXACT_KEYS else raw_mt.upper()
+            if mt_key not in _EXACT_KEYS:
+                mt_key = mt_key  # pass through unknown keys as-is
             lines += [
                 "[[section]]",
                 'section_type = "TFLiteModel"',
@@ -473,6 +606,19 @@ def run_build(args) -> None:
     from src.utils.paths import ARTIFACTS_DIR
 
     work_dir = Path(getattr(args, "work_dir", None) or ARTIFACTS_DIR / "litert_slim")
+
+    # ── Optional merge step ───────────────────────────────────────────────────
+    if getattr(args, "merge", False):
+        token = getattr(args, "hf_token", None)
+        merged_dir = work_dir / "merged_model"
+        merge_lora_adapter(
+            base_model=getattr(args, "base_model", DEFAULT_BASE_MODEL),
+            adapter=getattr(args, "adapter", DEFAULT_ADAPTER),
+            output_dir=merged_dir,
+            token=token,
+        )
+        # Override merged_model to point at our freshly merged local copy.
+        args.merged_model = str(merged_dir)
 
     if getattr(args, "official_shell", False):
         output = build_official_shell_bundle(work_dir, output_name=args.output_name)

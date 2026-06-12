@@ -1,20 +1,20 @@
-{"id": "greet_01", "prompt": "Habari yako?", "category": "greeting", "expect": "conversational_response"}
-{"id": "greet_02", "prompt": "Habari za asubuhi?", "category": "greeting", "expect": "conversational_response"}
-{"id": "greet_03", "prompt": "Karibu sana. Tunafurahi kukuona.", "category": "greeting", "expect": "conversational_response"}
-{"id": "survey_01", "prompt": "Je, unalima mazao gani msimu huu?", "category": "survey_question", "expect": "conversational_response"}
-{"id": "survey_02", "prompt": "Shamba lako lina ukubwa wa ekari ngapi?", "category": "survey_question", "expect": "conversational_response"}
-{"id": "survey_03", "prompt": "Je, unatumia mbolea kwenye shamba lako?", "category": "survey_question", "expect": "conversational_response"}
-{"id": "survey_04", "prompt": "Ni changamoto gani kubwa unayoipata katika kilimo?", "category": "survey_question", "expect": "conversational_response"}
-{"id": "survey_05", "prompt": "Je, mvua ilikuwa ya kutosha msimu uliopita?", "category": "survey_question", "expect": "conversational_response"}
-{"id": "survey_06", "prompt": "Unapata wapi mbegu za kupanda?", "category": "survey_question", "expect": "conversational_response"}
-{"id": "followup_01", "prompt": "Unaweza kunieleza zaidi kuhusu hilo?", "category": "followup", "expect": "conversational_response"}
-{"id": "followup_02", "prompt": "Kwa nini unafikiria hivyo?", "category": "followup", "expect": "conversational_response"}
-{"id": "followup_03", "prompt": "Unamaanisha nini hasa?", "category": "followup", "expect": "conversational_response"}
-{"id": "yesno_01", "prompt": "Je, umewahi kupata msaada wa serikali kwa ajili ya kilimo?", "category": "yes_no", "expect": "conversational_response"}
-{"id": "yesno_02", "prompt": "Je, una akaunti ya benki?", "category": "yes_no", "expect": "conversational_response"}
-{"id": "yesno_03", "prompt": "Je, unapenda kuendelea na mazungumzo haya?", "category": "yes_no", "expect": "conversational_response"}
-{"id": "ack_01", "prompt": "Asante sana kwa majibu yako.", "category": "acknowledgment", "expect": "conversational_response"}
-{"id": "ack_02", "prompt": "Sawa, tunaendelea na swali lijalo.", "category": "acknowledgment", "expect": "conversational_response"}
-{"id": "ack_03", "prompt": "Nimesikia. Hii ni muhimu sana.", "category": "acknowledgment", "expect": "conversational_response"}
-{"id": "short_01", "prompt": "Unaishi katika kijiji gani?", "category": "short_answer", "expect": "conversational_response"}
-{"id": "short_02", "prompt": "Una miaka mingapi ya uzoefu katika kilimo?", "category": "short_answer", "expect": "conversational_response"}
+{"id": "greet_01", "prompt": "Habari! Mimi ni mkulima wa ndizi na nina shida kidogo kwenye shamba langu. Unaweza kunisaidia?", "category": "greeting", "expect": "conversational_response"}
+{"id": "greet_02", "prompt": "Habari za asubuhi. Nimeamka na kuona majani ya ndizi yameanza kukauka. Nifanye nini?", "category": "problem_help", "expect": "conversational_response"}
+{"id": "greet_03", "prompt": "Samahani kukusumbua, lakini nina swali kuhusu kilimo changu. Una muda kidogo?", "category": "greeting", "expect": "conversational_response"}
+{"id": "help_01", "prompt": "Mvua imekuwa kidogo sana wiki hii. Je, shamba langu la mahindi linahitaji umwagiliaji, na ninafanyeje?", "category": "weather", "expect": "conversational_response"}
+{"id": "help_02", "prompt": "Ndizi zangu zina madoa meusi kwenye majani. Hii inaweza kuwa ugonjwa gani, na nitaweza kuzitibu vipi?", "category": "pest_disease", "expect": "conversational_response"}
+{"id": "help_03", "prompt": "Nina ekari tatu za ardhi na sijui nipande nini ili nipate faida zaidi msimu huu. Unaweza kunishauri?", "category": "planning", "expect": "conversational_response"}
+{"id": "help_04", "prompt": "Nimepanda mahindi lakini mbolea ilikuwa ngumu kuipata. Kuna njia nyingine ya kulisha udongo bila mbolea ghali?", "category": "how_to", "expect": "conversational_response"}
+{"id": "help_05", "prompt": "Majani ya viazi vitamu yameanza kunauka chini. Je, bado ninaweza kuokoa mazao yangu?", "category": "problem_help", "expect": "conversational_response"}
+{"id": "help_06", "prompt": "Shamba langu limejaa magugu na sijui kuanzia wapi. Unaweza kunipa hatua za kufuata?", "category": "how_to", "expect": "conversational_response"}
+{"id": "help_07", "prompt": "Nimeona wadudu wengi kwenye mmea wangu wa nyanya. Je, hii ni hatari kwa mazao yangu na nifanye nini?", "category": "pest_disease", "expect": "conversational_response"}
+{"id": "help_08", "prompt": "Tuna shida ya maji katika kijiji chetu. Ni mazao gani yanaweza kustahimili ukame na bado kuleta mavuno?", "category": "weather", "expect": "conversational_response"}
+{"id": "help_09", "prompt": "Nina mpango wa kuanzisha shamba dogo kwa mara ya kwanza. Nifanye nini kwanza kabla ya kupanda?", "category": "planning", "expect": "conversational_response"}
+{"id": "help_10", "prompt": "Unaweza kunielezea jinsi ya kulima ndizi kwa njia bora zaidi ili nipate mavuno mazuri?", "category": "how_to", "expect": "conversational_response"}
+{"id": "followup_01", "prompt": "Asante kwa maelezo yako. Sasa bado sielewi kuhusu kiwango cha mbolea — unaweza kunielezea kwa maneno rahisi?", "category": "followup", "expect": "conversational_response"}
+{"id": "followup_02", "prompt": "Umesema niweke mbolea mwezi ujao. Je, kuna dalili za kuona kwamba udongo unahitaji mbolea sasa hivi?", "category": "followup", "expect": "conversational_response"}
+{"id": "followup_03", "prompt": "Nimejaribu kunyunyiza dawa kama ulivyosema, lakini bado ninaona wadudu. Nifanye nini tena?", "category": "followup", "expect": "conversational_response"}
+{"id": "weather_01", "prompt": "Nimesikia kwamba kuna uwezekano wa mvua kubwa wiki ijayo. Ninafanye nini ili kulinda shamba langu la ndizi?", "category": "weather", "expect": "conversational_response"}
+{"id": "weather_02", "prompt": "Shamba langu lipo kwenye mteremko na udongo unateketea kila mvua ikinyesha. Una suluhisho lolote?", "category": "problem_help", "expect": "conversational_response"}
+{"id": "thanks_01", "prompt": "Asante sana kwa ushauri wako. Umekusaidia sana leo!", "category": "thanks", "expect": "conversational_response"}
+{"id": "thanks_02", "prompt": "Nimeelewa vizuri sasa. Nitajaribu kufanya kama ulivyosema. Asante!", "category": "thanks", "expect": "conversational_response"}

@@ -33,7 +33,6 @@ from __future__ import annotations
 
 import argparse
 import json
-import re
 import sys
 from pathlib import Path
 
@@ -54,78 +53,17 @@ DEFAULT_PROMPTS_FILE = next(
 DEFAULT_MODEL_ID = "google/gemma-4-E2B-it"
 DEFAULT_THRESHOLD = 0.80
 
-NDIZI_SYSTEM_PROMPT = (
-    "Wewe ni msaidizi wa kukusanya taarifa za kilimo kutoka kwa wakulima. "
-    "Unaongea Kiswahili. Unauliza maswali kuhusu shamba, mazao, na hali ya kilimo. "
-    "Jibu kwa ufupi na kwa heshima, kama vile mtafiti wa shamba angefanya."
+from chat_config import (  # noqa: E402
+    CHAT_GEN_KWARGS,
+    MAX_NEW_TOKENS,
+    NDIZI_ADVISOR_SYSTEM_PROMPT,
+    NDIZI_SURVEY_SYSTEM_PROMPT,
+    chat_with_retries,
+    score_chat_response,
 )
-MAX_NEW_TOKENS = 200
 
-# Common Swahili function words — used for basic language detection.
-_SWAHILI_TOKENS = {
-    "na", "ya", "wa", "kwa", "ni", "la", "za", "katika", "kuwa", "au",
-    "hiyo", "hii", "hizo", "hawa", "kama", "sana", "lakini", "pia",
-    "pamoja", "yake", "wetu", "wake", "kwamba", "ikiwa", "je", "sijui",
-    "ndiyo", "hapana", "asante", "tafadhali", "karibu", "habari", "nzuri",
-    "mzuri", "sawa", "vizuri", "tumia", "pata", "fanya", "lipa", "enda",
-}
-
-
-# ── scoring helpers ────────────────────────────────────────────────────────────
-
-def _is_non_empty(text: str) -> bool:
-    return len(text.strip()) > 0
-
-
-def _no_transcript_repetition(text: str) -> bool:
-    """Reject responses that repeat the same short phrase ≥3 times (transcriber artifact)."""
-    words = text.lower().split()
-    if len(words) < 3:
-        return True
-    # Check bigrams
-    for i in range(len(words) - 4):
-        bigram = (words[i], words[i + 1])
-        rest = " ".join(words[i + 2:])
-        pattern = " ".join(bigram)
-        if rest.count(pattern) >= 2:
-            return False
-    return True
-
-
-def _not_digits_only(text: str) -> bool:
-    """Reject responses that are pure numbers/digits (transcriber ASR output)."""
-    return not re.fullmatch(r"[\d\s.,]+", text.strip())
-
-
-def _has_swahili_content(text: str, min_fraction: float = 0.15) -> bool:
-    """At least min_fraction of tokens should be recognisable Swahili words."""
-    # Strip markdown formatting before counting so bold/emoji don't dilute the ratio.
-    clean = re.sub(r"\*+|_+|`+|#{1,6}\s?|!\[.*?\]\(.*?\)|\[.*?\]\(.*?\)", "", text)
-    tokens = re.findall(r"[a-zA-ZÀ-ÿ]+", clean.lower())
-    if not tokens:
-        return False
-    swahili_count = sum(1 for t in tokens if t in _SWAHILI_TOKENS)
-    return (swahili_count / len(tokens)) >= min_fraction
-
-
-def _not_pure_asr_instruction_echo(text: str) -> bool:
-    """Reject responses that echo the ASR instruction back (transcriber confusion)."""
-    asr_markers = ["transcribe", "speech segment", "only output the transcription"]
-    lower = text.lower()
-    return not any(m in lower for m in asr_markers)
-
-
-def score_response(response: str) -> tuple[bool, list[str]]:
-    """Return (passed, list_of_failed_checks)."""
-    checks = [
-        ("non_empty", _is_non_empty),
-        ("no_repetition", _no_transcript_repetition),
-        ("not_digits_only", _not_digits_only),
-        ("has_swahili_content", _has_swahili_content),
-        ("not_asr_echo", _not_pure_asr_instruction_echo),
-    ]
-    failed = [name for name, fn in checks if not fn(response)]
-    return len(failed) == 0, failed
+# Back-compat alias
+NDIZI_SYSTEM_PROMPT = NDIZI_SURVEY_SYSTEM_PROMPT
 
 
 # ── model loading ──────────────────────────────────────────────────────────────
@@ -157,9 +95,10 @@ def load_model(
         load_kw["device_map"] = {"": 0}
 
     if base_model_id:
-        from peft import PeftModel
+        from gemma4_peft_load import load_gemma4_peft_adapter
+
         base = AutoModelForMultimodalLM.from_pretrained(base_model_id, **load_kw)
-        model = PeftModel.from_pretrained(base, model_id, token=token)
+        model = load_gemma4_peft_adapter(base, model_id, token=token)
     else:
         model = AutoModelForMultimodalLM.from_pretrained(model_id, **load_kw)
 
@@ -176,32 +115,27 @@ def run_chat_prompt(
     model,
     processor,
     device,
-    system_prompt: str | None = None,
+    system_prompt: str | None = NDIZI_ADVISOR_SYSTEM_PROMPT,
+    category: str = "unknown",
 ) -> str:
-    messages = []
-    if system_prompt:
-        messages.append({"role": "system", "content": [{"type": "text", "text": system_prompt}]})
-    messages.append({"role": "user", "content": [{"type": "text", "text": prompt}]})
-    inputs_text = processor.apply_chat_template(
-        messages,
-        add_generation_prompt=True,
-        tokenize=False,
-    )
-    inputs = processor(text=inputs_text, return_tensors="pt").to(device)
-
-    with torch.inference_mode():
-        output_ids = model.generate(
-            **inputs,
-            max_new_tokens=MAX_NEW_TOKENS,
-            do_sample=False,
-            repetition_penalty=1.1,
-            no_repeat_ngram_size=4,
+    def _generate(messages: list[dict], gen_kw: dict) -> str:
+        inputs_text = processor.apply_chat_template(
+            messages,
+            add_generation_prompt=True,
+            tokenize=False,
         )
+        inputs = processor(text=inputs_text, return_tensors="pt").to(device)
+        with torch.inference_mode():
+            output_ids = model.generate(**inputs, max_new_tokens=MAX_NEW_TOKENS, **gen_kw)
+        input_len = inputs["input_ids"].shape[1]
+        return processor.decode(output_ids[0][input_len:], skip_special_tokens=True).strip()
 
-    # Decode only the newly generated tokens
-    input_len = inputs["input_ids"].shape[1]
-    new_ids = output_ids[0][input_len:]
-    return processor.decode(new_ids, skip_special_tokens=True).strip()
+    return chat_with_retries(
+        prompt,
+        category=category,
+        system=system_prompt,
+        generate_fn=_generate,
+    )
 
 
 # ── main ──────────────────────────────────────────────────────────────────────
@@ -216,9 +150,9 @@ def parse_args() -> argparse.Namespace:
     p.add_argument("--threshold", type=float, default=DEFAULT_THRESHOLD, help="Minimum pass_rate to exit 0 (default: 0.80)")
     p.add_argument(
         "--system-prompt",
-        default=None,
-        help="System prompt to set model role (e.g. survey interviewer). "
-             "Use 'ndizi' to apply the built-in Ndizi surveyor prompt.",
+        default="advisor",
+        help="System role: advisor (default, farming help), survey (legacy interviewer), "
+             "none (no system message), or raw text.",
     )
     p.add_argument("--device-map", choices=("cuda", "auto", "cpu"), default="cuda")
     p.add_argument("--max-samples", type=int, default=None, help="Cap number of prompts (debug)")
@@ -245,7 +179,13 @@ def main() -> None:
         prompts = prompts[: args.max_samples]
 
     if args.system_prompt == "ndizi":
-        args.system_prompt = NDIZI_SYSTEM_PROMPT
+        args.system_prompt = NDIZI_SURVEY_SYSTEM_PROMPT
+    elif args.system_prompt == "survey":
+        args.system_prompt = NDIZI_SURVEY_SYSTEM_PROMPT
+    elif args.system_prompt == "advisor":
+        args.system_prompt = NDIZI_ADVISOR_SYSTEM_PROMPT
+    elif args.system_prompt == "none":
+        args.system_prompt = None
 
     model, processor, device = load_model(
         args.model_id, args.base_model_id, token, args.device_map
@@ -261,8 +201,11 @@ def main() -> None:
         category = item.get("category", "unknown")
 
         print(f"  [{prompt_id}] {prompt_text[:60]}")
-        response = run_chat_prompt(prompt_text, model, processor, device, system_prompt=args.system_prompt)
-        ok, failed_checks = score_response(response)
+        response = run_chat_prompt(
+            prompt_text, model, processor, device,
+            system_prompt=args.system_prompt, category=category,
+        )
+        ok, failed_checks = score_chat_response(response, category=category)
 
         if ok:
             passed += 1

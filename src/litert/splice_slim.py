@@ -372,8 +372,14 @@ def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
     for tok in sorted(dump_dir.rglob("tokenizer.json")):
         add_section(BundleSection("HF_Tokenizer", tok))
 
-    for sp in sorted(dump_dir.rglob("*.model")):
-        if "tokenizer" in sp.name.lower() or sp.suffix == ".model":
+    # SP_Tokenizer: peek dumps as SectionN_SP_Tokenizer.spiece (LiteRT-LM ≥1.4) or *.model
+    for sp in sorted(
+        list(dump_dir.rglob("*SP_Tokenizer*")) +
+        list(dump_dir.rglob("*.spiece")) +
+        list(dump_dir.rglob("*.model"))
+    ):
+        n = sp.name.lower()
+        if "sp_tokenizer" in n or "tokenizer" in n or sp.suffix in (".spiece", ".model"):
             add_section(BundleSection("SP_Tokenizer", sp))
 
     for tflite in sorted(dump_dir.rglob("*.tflite")):
@@ -642,6 +648,60 @@ def _ensure_tokenizer(bundle_dir: Path, merged_model: str, ft_dump: Path | None 
     )
 
 
+def build_toml_from_base(base_dump: Path, bundle_staging: Path) -> Path:
+    """Build bundle.toml by adapting the community model.toml (dumped by litert-lm-peek).
+
+    The community model.toml already encodes every section correctly:
+      - SP_Tokenizer with correct .spiece path
+      - backend_constraint = "cpu" for audio/vision adapters
+      - additional_metadata (prefer_activation_type = "fp16") for vision/prefill
+    We preserve all of that and only replace the [system_metadata] block.
+
+    Since build_slim_bundle() copies the finetuned prefill_decode over the base
+    one *before* calling this function (same filename), the data_paths in the
+    community model.toml are still valid in bundle_staging.
+    """
+    base_toml = base_dump / "model.toml"
+    if not base_toml.exists():
+        raise FileNotFoundError(
+            f"No model.toml in {base_dump}. "
+            "litert-lm-peek ≥1.4 dumps model.toml alongside the section files; "
+            "upgrade litert-lm-builder/peek if it is missing."
+        )
+
+    content = base_toml.read_text(encoding="utf-8")
+
+    # Replace the [system_metadata] ... ] block with our custom metadata.
+    custom_meta = (
+        "[system_metadata]\n"
+        "entries = [\n"
+        '  { key = "author", value_type = "String", value = "smutuvi/ndizi" },\n'
+        '  { key = "base_litert", value_type = "String",'
+        ' value = "litert-community/gemma-4-E2B-it-litert-lm" },\n'
+        '  { key = "finetune", value_type = "String",'
+        ' value = "smutuvi/gemma-4-e2b-sw-asr-ndizi-merged" },\n'
+        '  { key = "bundle_kind", value_type = "String",'
+        ' value = "spliced_llm_prefill_decode" },\n'
+        "]"
+    )
+    content = re.sub(
+        r"\[system_metadata\].*?^\]",
+        custom_meta,
+        content,
+        count=1,
+        flags=re.DOTALL | re.MULTILINE,
+    )
+
+    bundle_toml = bundle_staging / "bundle.toml"
+    bundle_toml.write_text(content, encoding="utf-8")
+    print(
+        f"[info] bundle.toml built from community model.toml "
+        f"(SP_Tokenizer + backend_constraint + additional_metadata preserved)"
+    )
+    print(f"\n[toml] {bundle_toml}\n{bundle_toml.read_text()}")
+    return bundle_toml
+
+
 def build_slim_bundle(
     work_dir: Path,
     *,
@@ -693,18 +753,20 @@ def build_slim_bundle(
         shutil.rmtree(bundle_dir)
     shutil.copytree(base_dump, bundle_dir)
 
-    # Ensure tokenizer.json is present before inventory so the builder can pack it.
-    _ensure_tokenizer(bundle_dir, merged_model, ft_dump=work_dir / "finetuned_unpack")
-
-    sections = inventory_from_dump(bundle_dir, base_log)
-    manifest = work_dir / "bundle_manifest.json"
-    manifest.write_text(
-        json.dumps([{**asdict(s), "data_path": str(s.data_path)} for s in sections], indent=2),
-        encoding="utf-8",
-    )
-
-    toml_path = bundle_dir / "bundle.toml"
-    write_bundle_toml(sections, toml_path)
+    # Build TOML from the community model.toml (preserves SP_Tokenizer, backend_constraint,
+    # additional_metadata etc.) — falls back to inventory-based approach if model.toml absent.
+    if (base_dump / "model.toml").exists():
+        toml_path = build_toml_from_base(base_dump, bundle_dir)
+    else:
+        print("[warn] model.toml not found in base_dump — falling back to filename-based inventory")
+        sections = inventory_from_dump(bundle_dir, base_log)
+        manifest = work_dir / "bundle_manifest.json"
+        manifest.write_text(
+            json.dumps([{**asdict(s), "data_path": str(s.data_path)} for s in sections], indent=2),
+            encoding="utf-8",
+        )
+        toml_path = bundle_dir / "bundle.toml"
+        write_bundle_toml(sections, toml_path)
 
     output_litertlm = work_dir / output_name
     build_litertlm_from_toml(toml_path, output_litertlm)

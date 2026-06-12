@@ -368,10 +368,20 @@ def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
         add_section(BundleSection("LlmMetadata", metadata_candidates[0]))
 
     # HF_Tokenizer: peek dumps as Section{N}_HF_Tokenizer_Zlib.zlib
-    for zlib in sorted(dump_dir.rglob("*HF_Tokenizer*.zlib")):
-        add_section(BundleSection("HF_Tokenizer_Zlib", zlib))
+    # The builder only accepts *uncompressed* tokenizer JSON as section_type "HF_Tokenizer"
+    # (it compresses internally).  Decompress the .zlib so the builder can read it.
+    for zlib_path in sorted(dump_dir.rglob("*HF_Tokenizer*.zlib")):
+        try:
+            import zlib as _zlib
+            raw = _zlib.decompress(zlib_path.read_bytes())
+            tok_json = zlib_path.parent / "tokenizer_hf.json"
+            tok_json.write_bytes(raw)
+            print(f"[info] Decompressed {zlib_path.name} → {tok_json.name} ({len(raw)} bytes)")
+            add_section(BundleSection("HF_Tokenizer", tok_json))
+        except Exception as _e:
+            print(f"[warn] Could not decompress {zlib_path}: {_e} — skipping tokenizer")
 
-    # Plain JSON tokenizer (older bundles)
+    # Plain JSON tokenizer (older bundles or export output)
     for tok in sorted(dump_dir.rglob("tokenizer.json")):
         add_section(BundleSection("HF_Tokenizer", tok))
 
@@ -438,9 +448,7 @@ def write_bundle_toml(sections: list[BundleSection], toml_path: Path) -> None:
         st = sec.section_type
         if st == "LlmMetadata":
             lines += ["[[section]]", 'section_type = "LlmMetadata"', f'data_path = "{rel}"', ""]
-        elif st in ("HF_Tokenizer_Zlib", "HfTokenizerZlib"):
-            lines += ["[[section]]", 'section_type = "HF_Tokenizer_Zlib"', f'data_path = "{rel}"', ""]
-        elif st in ("HF_Tokenizer", "HfTokenizer", "HFTokenizer"):
+        elif st in ("HF_Tokenizer", "HfTokenizer", "HFTokenizer", "HF_Tokenizer_Zlib"):
             lines += ["[[section]]", 'section_type = "HF_Tokenizer"', f'data_path = "{rel}"', ""]
         elif st in ("SP_Tokenizer", "SpTokenizer"):
             lines += ["[[section]]", 'section_type = "SP_Tokenizer"', f'data_path = "{rel}"', ""]

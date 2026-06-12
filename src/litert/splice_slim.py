@@ -367,21 +367,8 @@ def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
     if metadata_candidates:
         add_section(BundleSection("LlmMetadata", metadata_candidates[0]))
 
-    # HF_Tokenizer: peek dumps as Section{N}_HF_Tokenizer_Zlib.zlib
-    # The builder only accepts *uncompressed* tokenizer JSON as section_type "HF_Tokenizer"
-    # (it compresses internally).  Decompress the .zlib so the builder can read it.
-    for zlib_path in sorted(dump_dir.rglob("*HF_Tokenizer*.zlib")):
-        try:
-            import zlib as _zlib
-            raw = _zlib.decompress(zlib_path.read_bytes())
-            tok_json = zlib_path.parent / "tokenizer_hf.json"
-            tok_json.write_bytes(raw)
-            print(f"[info] Decompressed {zlib_path.name} → {tok_json.name} ({len(raw)} bytes)")
-            add_section(BundleSection("HF_Tokenizer", tok_json))
-        except Exception as _e:
-            print(f"[warn] Could not decompress {zlib_path}: {_e} — skipping tokenizer")
-
-    # Plain JSON tokenizer (older bundles or export output)
+    # HF_Tokenizer: look for tokenizer.json (placed by _ensure_tokenizer before this call)
+    # or any plain JSON tokenizer in the dump.
     for tok in sorted(dump_dir.rglob("tokenizer.json")):
         add_section(BundleSection("HF_Tokenizer", tok))
 
@@ -561,6 +548,60 @@ Reproduced with `python scripts/build_litert_lm_slim.py` in `ndizi_mlops_gemma-4
     )
 
 
+def _ensure_tokenizer(bundle_dir: Path, merged_model: str, ft_dump: Path | None = None) -> None:
+    """Place tokenizer.json in bundle_dir so inventory_from_dump() can include it.
+
+    Tries in order:
+      1. Already exists in bundle_dir → nothing to do.
+      2. Decompress *HF_Tokenizer*.zlib from bundle_dir or ft_dump (tries
+         zlib, gzip, and raw deflate — peek naming convention says "Zlib" but
+         the actual compression may vary across builder versions).
+      3. Download tokenizer.json from the merged model on HuggingFace Hub.
+    """
+    import gzip as _gzip
+    import zlib as _zlib
+
+    tok_dst = bundle_dir / "tokenizer.json"
+    if tok_dst.exists():
+        print(f"[info] tokenizer.json already present in bundle_dir")
+        return
+
+    # Candidates: bundle_dir first, then ft_dump
+    search_dirs = [bundle_dir] + ([ft_dump] if ft_dump and ft_dump.exists() else [])
+    for sdir in search_dirs:
+        for zp in sorted(sdir.rglob("*HF_Tokenizer*.zlib")):
+            raw_data = zp.read_bytes()
+            for decompress, label in [
+                (_zlib.decompress, "zlib"),
+                (_gzip.decompress, "gzip"),
+                (lambda d: _zlib.decompress(d, -15), "deflate"),
+            ]:
+                try:
+                    data = decompress(raw_data)
+                    tok_dst.write_bytes(data)
+                    print(
+                        f"[info] Decompressed {zp.name} ({label}) → tokenizer.json "
+                        f"({len(data) / 1e3:.1f} KB)"
+                    )
+                    return
+                except Exception:
+                    pass
+            print(f"[warn] Could not decompress {zp} — will try HF download")
+
+    # Fall back: download directly from the merged model repo
+    print(f"[info] Downloading tokenizer.json from {merged_model} …")
+    try:
+        from huggingface_hub import hf_hub_download
+        src = Path(hf_hub_download(merged_model, "tokenizer.json"))
+        shutil.copy2(src, tok_dst)
+        print(f"[info] tokenizer.json downloaded ({tok_dst.stat().st_size / 1e6:.1f} MB)")
+    except Exception as e:
+        print(
+            f"[WARN] Could not obtain tokenizer.json: {e}\n"
+            "       The bundle will be missing a tokenizer and will crash at runtime."
+        )
+
+
 def build_slim_bundle(
     work_dir: Path,
     *,
@@ -611,6 +652,9 @@ def build_slim_bundle(
     if bundle_dir.exists():
         shutil.rmtree(bundle_dir)
     shutil.copytree(base_dump, bundle_dir)
+
+    # Ensure tokenizer.json is present before inventory so the builder can pack it.
+    _ensure_tokenizer(bundle_dir, merged_model, ft_dump=work_dir / "finetuned_unpack")
 
     sections = inventory_from_dump(bundle_dir, base_log)
     manifest = work_dir / "bundle_manifest.json"

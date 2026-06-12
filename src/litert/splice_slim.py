@@ -247,12 +247,13 @@ def _infer_tflite_model_type(path: Path) -> str:
         return "prefill_decode"
     if "embedder" in n:
         return "embedder"
-    # Audio / vision encoders: use the builder TOML key (not the runtime lookup key).
-    # The library maps AUDIO_ENCODER → TF_LITE_AUDIO_ENCODER_HW at runtime.
+    # Audio / vision encoders: use the builder TOML key.
+    # get_enum_from_tf_free_value() lowercases the value and prepends "tf_lite_",
+    # so "AUDIO_ENCODER_HW" → "tf_lite_audio_encoder_hw" = TfLiteModelType.TF_LITE_AUDIO_ENCODER_HW.
     if "audio" in n:
-        return "AUDIO_ENCODER"
+        return "AUDIO_ENCODER_HW"
     if "vision" in n:
-        return "VISION_ENCODER"
+        return "VISION_ENCODER_HW"
     if "prefill" in n:
         return "prefill"
     if "decode" in n:
@@ -354,9 +355,9 @@ def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
 
     # ── Sanity check: warn if audio encoder is missing ───────────────────────
     tflite_types = {s.model_type for s in sections if s.section_type == "TFLiteModel"}
-    if "AUDIO_ENCODER" not in tflite_types:
+    if "AUDIO_ENCODER_HW" not in tflite_types:
         print(
-            "[warn] No AUDIO_ENCODER section found — ASR will fail at runtime.\n"
+            "[warn] No AUDIO_ENCODER_HW section found — ASR will fail at runtime.\n"
             "       Check that the base community bundle contains an audio encoder TFLite."
         )
     else:

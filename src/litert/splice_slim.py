@@ -195,7 +195,15 @@ def run_finetuned_export(
     export_dir: Path,
     *,
     quantization: str = "dynamic_wi4_afp32",
+    cache_length: int = 1024,
+    prefill_lengths: str = "[64]",
 ) -> Path:
+    """Export the merged model to a .litertlm bundle.
+
+    cache_length and prefill_lengths are kept small (1024 / [64]) to ensure
+    the prefill_decode TFLite stays under the 2 GB FlatBuffers limit, which
+    litert-lm-builder requires.  The community model uses the same settings.
+    """
     export_dir.mkdir(parents=True, exist_ok=True)
     if any(export_dir.iterdir()):
         shutil.rmtree(export_dir)
@@ -215,8 +223,8 @@ def run_finetuned_export(
         "--litert_lm_model_type_override=gemma4",
         "--export_vision_encoder=False",
         "--keep_temporary_files=True",
-        "--prefill_lengths=[128]",
-        "--cache_length=2048",
+        f"--prefill_lengths={prefill_lengths}",
+        f"--cache_length={cache_length}",
     ]
     _run(cmd)
 
@@ -493,6 +501,8 @@ def build_slim_bundle(
     skip_export: bool = False,
     finetuned_litertlm: Path | None = None,
     quantization: str = "dynamic_wi4_afp32",
+    cache_length: int = 1024,
+    prefill_lengths: str = "[64]",
 ) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
     base_dir = work_dir / "base"
@@ -512,7 +522,12 @@ def build_slim_bundle(
         ft_litertlm = Path(finetuned_litertlm)
     else:
         export_dir = work_dir / "finetuned_export"
-        ft_litertlm = run_finetuned_export(merged_model, export_dir, quantization=quantization)
+        ft_litertlm = run_finetuned_export(
+            merged_model, export_dir,
+            quantization=quantization,
+            cache_length=cache_length,
+            prefill_lengths=prefill_lengths,
+        )
 
     print(f"Finetuned export bundle: {ft_litertlm} ({ft_litertlm.stat().st_size / 1e9:.2f} GB)")
 
@@ -647,6 +662,8 @@ def run_build(args) -> None:
         skip_export=bool(args.skip_export),
         finetuned_litertlm=Path(args.finetuned_litertlm) if args.finetuned_litertlm else None,
         quantization=args.quantization,
+        cache_length=getattr(args, "cache_length", 1024),
+        prefill_lengths=getattr(args, "prefill_lengths", "[64]"),
     )
 
     if args.upload:

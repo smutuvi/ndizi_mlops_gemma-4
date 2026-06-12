@@ -85,6 +85,10 @@ def main() -> int:
     p.add_argument("--hub-repo", default=DEFAULT_HUB_REPO, help="HF repo for --upload")
     p.add_argument("--quantization", default="dynamic_wi4_afp32",
                    help="Export quantization recipe for LLM slice (default: dynamic_wi4_afp32 = INT4)")
+    p.add_argument("--cache-length", type=int, default=1024,
+                   help="KV-cache length for export (default: 1024 — keeps TFLite under 2 GB FlatBuffers limit)")
+    p.add_argument("--prefill-lengths", default="[64]",
+                   help="Prefill sequence lengths for export (default: [64])")
     p.add_argument(
         "--skip-export",
         action="store_true",

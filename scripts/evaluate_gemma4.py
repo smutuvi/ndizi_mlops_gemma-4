@@ -130,6 +130,13 @@ def main() -> int:
         help="Zero-shot base model (no LoRA checkpoint). Use with --audio for single-file inference.",
     )
     p.add_argument(
+        "--no-adapter",
+        action="store_true",
+        dest="no_adapter",
+        help="Load --model directly without a LoRA adapter. Use for evaluating merged Hub models "
+             "(e.g. --model smutuvi/gemma-4-e2b-sw-asr-ndizi-merged --no-adapter).",
+    )
+    p.add_argument(
         "--audio",
         type=str,
         default=None,

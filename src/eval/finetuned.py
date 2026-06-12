@@ -193,9 +193,15 @@ def run_evaluate(args) -> None:
     out_dir = Path(getattr(args, "output_dir", None) or PREDICTIONS_DIR)
     out_dir.mkdir(parents=True, exist_ok=True)
 
-    model, processor, adapter = load_finetuned_gemma(
-        checkpoint, fp16=bool(getattr(args, "fp16", False))
-    )
+    if getattr(args, "no_adapter", False):
+        # Load merged model directly — no LoRA adapter (use with --model <merged-hub-id>)
+        from src.eval.baseline import load_baseline_gemma
+        model, processor = load_baseline_gemma(fp16=bool(getattr(args, "fp16", False)))
+        adapter = None
+    else:
+        model, processor, adapter = load_finetuned_gemma(
+            checkpoint, fp16=bool(getattr(args, "fp16", False))
+        )
     tests = _load_eval_tests(args)
 
     chunk_cli = getattr(args, "chunk_length_s", None)
@@ -289,7 +295,7 @@ def run_evaluate(args) -> None:
         "per_set": per_set,
         "splits": results,
         "run_info": {
-            "checkpoint": str(adapter.resolve()),
+            "checkpoint": str(adapter.resolve()) if adapter is not None else get_runtime().base_model_id,
             "base_model_id": get_runtime().base_model_id,
             "test_datasets": getattr(args, "test_datasets", None),
             "output_dir": str(out_dir.resolve()),

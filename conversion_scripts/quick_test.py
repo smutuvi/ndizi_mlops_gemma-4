@@ -53,7 +53,7 @@ def test_chat(model: str) -> bool:
 
         litert_lm.set_min_log_severity(litert_lm.LogSeverity.ERROR)
 
-        with litert_lm.Engine(model) as engine:
+        with litert_lm.Engine(model, backend=litert_lm.Backend.CPU()) as engine:
             with engine.create_conversation(messages=[
                 {"role": "system", "content": [{"type": "text",
                  "text": "Wewe ni msaidizi wa lugha ya Kiswahili."}]}
@@ -85,7 +85,7 @@ def test_asr(model: str, audio: str) -> bool:
 
         litert_lm.set_min_log_severity(litert_lm.LogSeverity.ERROR)
 
-        with litert_lm.Engine(model, audio_backend=litert_lm.Backend.CPU()) as engine:
+        with litert_lm.Engine(model, backend=litert_lm.Backend.CPU(), audio_backend=litert_lm.Backend.CPU()) as engine:
             with engine.create_conversation() as conv:
                 resp = conv.send_message({
                     "role": "user",

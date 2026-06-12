@@ -247,11 +247,12 @@ def _infer_tflite_model_type(path: Path) -> str:
         return "prefill_decode"
     if "embedder" in n:
         return "embedder"
-    # Audio / vision encoders must use the exact key LiteRT-LM expects.
+    # Audio / vision encoders: use the builder TOML key (not the runtime lookup key).
+    # The library maps AUDIO_ENCODER → TF_LITE_AUDIO_ENCODER_HW at runtime.
     if "audio" in n:
-        return "TF_LITE_AUDIO_ENCODER_HW"
+        return "AUDIO_ENCODER"
     if "vision" in n:
-        return "TF_LITE_VISION_ENCODER_HW"
+        return "VISION_ENCODER"
     if "prefill" in n:
         return "prefill"
     if "decode" in n:
@@ -353,9 +354,9 @@ def inventory_from_dump(dump_dir: Path, peek_log: str) -> list[BundleSection]:
 
     # ── Sanity check: warn if audio encoder is missing ───────────────────────
     tflite_types = {s.model_type for s in sections if s.section_type == "TFLiteModel"}
-    if "TF_LITE_AUDIO_ENCODER_HW" not in tflite_types:
+    if "AUDIO_ENCODER" not in tflite_types:
         print(
-            "[warn] No TF_LITE_AUDIO_ENCODER_HW section found — ASR will fail at runtime.\n"
+            "[warn] No AUDIO_ENCODER section found — ASR will fail at runtime.\n"
             "       Check that the base community bundle contains an audio encoder TFLite."
         )
     else:
@@ -422,18 +423,29 @@ def build_litertlm_from_toml(toml_path: Path, output_litertlm: Path) -> None:
     builder = _which("litert-lm-builder")
     if output_litertlm.exists():
         output_litertlm.unlink()
-    _run(
-        [
-            builder,
-            "toml",
-            "--path",
-            str(toml_path),
-            "output",
-            "--path",
-            str(output_litertlm),
-        ],
-        cwd=toml_path.parent,
-    )
+
+    # Print TOML so any misconfiguration is visible in the log.
+    print(f"\n[toml] {toml_path}\n{toml_path.read_text()}")
+
+    cmd = [
+        builder,
+        "toml",
+        "--path",
+        str(toml_path),
+        "output",
+        "--path",
+        str(output_litertlm),
+    ]
+    print("[cmd]", " ".join(cmd), flush=True)
+
+    # Stream builder output directly — do NOT capture — so errors are visible.
+    import subprocess as _sp
+    result = _sp.run(cmd, cwd=str(toml_path.parent))
+    if result.returncode != 0:
+        raise RuntimeError(
+            f"litert-lm-builder failed (exit {result.returncode}). "
+            f"Check the TOML printed above for wrong model_type or missing files."
+        )
 
 
 def publish_litertlm(

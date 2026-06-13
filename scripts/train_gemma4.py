@@ -90,6 +90,12 @@ def main() -> int:
     )
     p.add_argument("--debug-lora-targets", action="store_true", help="Log modules matched by LoRA regex.")
     p.add_argument(
+        "--output-dir",
+        default=None,
+        dest="output_dir",
+        help="Override checkpoint output directory (default: artifacts/checkpoints).",
+    )
+    p.add_argument(
         "--peft-clippable-patch",
         action="store_true",
         help="Monkey-patch Gemma4ClippableLinear before load (last resort; may break 4-bit).",

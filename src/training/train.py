@@ -57,6 +57,11 @@ def _strip_label_positions(pred_row, label_row):
 
 def run_train(cli_args) -> None:
     rt = get_runtime()
+    # Allow --output-dir override; fall back to CHECKPOINT_DIR from paths.py
+    _out_dir = getattr(cli_args, "output_dir", None)
+    checkpoint_dir = Path(_out_dir) if _out_dir else CHECKPOINT_DIR
+    checkpoint_dir.mkdir(parents=True, exist_ok=True)
+
     dsd = load_from_disk(str(PREPARED_LOCAL))
     train_ds = dsd["train"]
 
@@ -174,7 +179,7 @@ def run_train(cli_args) -> None:
         strategy_kw["save_strategy"] = "steps"
 
     ta_kw = dict(
-        output_dir=str(CHECKPOINT_DIR),
+        output_dir=str(checkpoint_dir),
         per_device_train_batch_size=1,
         per_device_eval_batch_size=1,
         gradient_accumulation_steps=int(getattr(cli_args, "grad_accum", 16)),
@@ -217,7 +222,7 @@ def run_train(cli_args) -> None:
     trainer = _trainer(**trainer_kw)
     trainer.train()
 
-    out_dir = CHECKPOINT_DIR / "best"
+    out_dir = checkpoint_dir / "best"
     best_ckpt = getattr(trainer.state, "best_model_checkpoint", None)
     if best_ckpt:
         print(f"[train] Best checkpoint: {best_ckpt} (eval WER={getattr(trainer.state, 'best_metric', None)})")

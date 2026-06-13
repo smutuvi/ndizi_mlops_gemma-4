@@ -22,7 +22,7 @@ def gemma_transcribe(
         inputs = gemma_build_inputs(processor, wave, instruction, add_generation_prompt=True)
         inputs = gemma_inputs_to_device(inputs, model)
         with torch.no_grad():
-            out = model.generate(**inputs, max_new_tokens=256, do_sample=False)
+            out = model.generate(**inputs, max_new_tokens=256, min_new_tokens=4, do_sample=False)
         new_tokens = out[:, inputs["input_ids"].shape[-1] :]
         hyp = processor.batch_decode(new_tokens, skip_special_tokens=True)[0].strip()
         if casing_polish:

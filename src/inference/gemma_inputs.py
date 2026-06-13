@@ -56,12 +56,31 @@ def resample_mono_16k(audio) -> np.ndarray:
     return wav
 
 
-def prepare_audio_for_gemma(audio):
-    """Mono float32 16 kHz waveform, capped at Gemma's 30 s limit."""
+def normalize_audio_rms(wav: np.ndarray, target_rms: float = 0.09) -> np.ndarray:
+    """Normalize waveform to a target RMS level (matches typical ndizi-1 training energy).
+
+    Quiet clinical recordings (RMS ~0.03) get amplified to training distribution.
+    Silent segments (RMS < 1e-6) are returned unchanged to avoid divide-by-zero.
+    """
+    rms = float(np.sqrt(np.mean(wav ** 2)))
+    if rms < 1e-6:
+        return wav
+    return np.clip(wav * (target_rms / rms), -1.0, 1.0).astype(np.float32)
+
+
+def prepare_audio_for_gemma(audio, *, normalize: bool = True):
+    """Mono float32 16 kHz waveform, capped at Gemma's 30 s limit.
+
+    Args:
+        normalize: RMS-normalize to training distribution energy (default True).
+                   Set False to match original behaviour.
+    """
     wav = resample_mono_16k(audio)
     max_samples = int(MAX_AUDIO_SEC * TARGET_SR)
     if len(wav) > max_samples:
         wav = wav[:max_samples]
+    if normalize:
+        wav = normalize_audio_rms(wav)
     return wav
 
 

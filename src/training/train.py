@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import inspect
 import os
+from pathlib import Path
 
 import torch
 from datasets import interleave_datasets, load_from_disk

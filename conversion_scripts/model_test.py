@@ -117,8 +117,11 @@ def main() -> int:
                                  formatter_class=argparse.RawDescriptionHelpFormatter)
     ap.add_argument("--checkpoint", default=str(DEFAULT_CHECKPOINT),
                     help="LoRA adapter directory (default: artifacts/checkpoints/best)")
+    ap.add_argument("--model", default=None,
+                    help="Override base model (e.g. smutuvi/gemma-4-e2b-sw-asr-ndizi-merged). "
+                         "Use with --no-adapter to test a merged Hub model.")
     ap.add_argument("--no-adapter", action="store_true",
-                    help="Load base model without LoRA adapter")
+                    help="Load model directly without LoRA adapter (use with --model for merged Hub models)")
     ap.add_argument("--mode", choices=("asr", "chat", "both"), default="both",
                     help="Which tests to run (default: both)")
 
@@ -138,11 +141,17 @@ def main() -> int:
 
     args = ap.parse_args()
 
+    # Apply model override if given (e.g. merged Hub model)
+    if args.model:
+        from src.utils.runtime import apply_model_choice
+        apply_model_choice(args.model)
+
     # Load model
     if args.no_adapter:
         from src.eval.baseline import load_baseline_gemma
         model, processor = load_baseline_gemma(fp16=False)
-        print("Model     : base (no LoRA adapter)")
+        label = args.model or "base (no LoRA adapter)"
+        print(f"Model     : {label}")
     else:
         from src.eval.finetuned import load_finetuned_gemma
         checkpoint = Path(args.checkpoint).expanduser()

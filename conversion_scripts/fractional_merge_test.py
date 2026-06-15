@@ -174,8 +174,11 @@ def main() -> int:
             print(f"  Saved. Use with:")
             print(f"    python scripts/build_litert_lm_slim.py --merged-model {save_dir}")
 
-        run_asr(model, processor, args.datasets, args.n)
-        run_chat(model, processor, prompts, args.max_new_tokens)
+        if args.n > 0:
+            run_asr(model, processor, args.datasets, args.n)
+            run_chat(model, processor, prompts, args.max_new_tokens)
+        else:
+            print("\n  (--n 0: skipping ASR/chat samples)")
 
         print(f"\n{'═'*60}")
 

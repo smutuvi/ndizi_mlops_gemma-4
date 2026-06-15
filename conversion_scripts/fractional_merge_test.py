@@ -144,7 +144,17 @@ def main() -> int:
     ap.add_argument("--n", type=int, default=3, help="ASR samples per dataset")
     ap.add_argument("--chat-prompts", nargs="+", default=None)
     ap.add_argument("--max-new-tokens", type=int, default=256)
+    ap.add_argument(
+        "--save",
+        default=None,
+        metavar="DIR",
+        help="Save the merged model to DIR (only valid when a single --scale is given). "
+             "Use the saved path as --merged-model for build_litert_lm_slim.py.",
+    )
     args = ap.parse_args()
+
+    if args.save and len(args.scale) > 1:
+        ap.error("--save can only be used with a single --scale value")
 
     checkpoint = Path(args.checkpoint).expanduser()
     prompts = args.chat_prompts or DEFAULT_CHAT_PROMPTS
@@ -155,6 +165,15 @@ def main() -> int:
         print(f"{'═'*60}")
 
         model, processor = load_and_scale(checkpoint, scale)
+
+        if args.save:
+            save_dir = Path(args.save)
+            print(f"\n  Saving merged model to {save_dir} ...")
+            model.save_pretrained(str(save_dir))
+            processor.save_pretrained(str(save_dir))
+            print(f"  Saved. Use with:")
+            print(f"    python scripts/build_litert_lm_slim.py --merged-model {save_dir}")
+
         run_asr(model, processor, args.datasets, args.n)
         run_chat(model, processor, prompts, args.max_new_tokens)
 

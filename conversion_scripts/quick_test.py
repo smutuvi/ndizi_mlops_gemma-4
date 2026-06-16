@@ -55,11 +55,25 @@ ASR_INSTRUCTION = "Andika maneno unayosikia katika sauti hii."
 # ── Helpers ───────────────────────────────────────────────────────────────────
 
 def _save_audio_tmp(audio: dict) -> Path:
-    """Save a datasets-style audio dict to a temp WAV file, return the path."""
+    """Save a datasets-style audio dict to a 16 kHz int16 WAV (litert_lm compatible)."""
     import numpy as np
 
     arr = np.asarray(audio["array"], dtype=np.float32)
     sr = int(audio.get("sampling_rate", 16000))
+
+    # Resample to 16 kHz — litert_lm audio encoder expects 16 kHz
+    if sr != 16000:
+        try:
+            import torch
+            import torchaudio.functional as taf
+            arr = taf.resample(torch.from_numpy(arr), sr, 16000).numpy().astype(np.float32)
+        except Exception:
+            from scipy.signal import resample_poly
+            arr = resample_poly(arr, 16000, sr).astype(np.float32)
+        sr = 16000
+
+    # Convert float32 → int16 PCM (universally supported by audio decoders)
+    arr_int16 = (arr * 32767.0).clip(-32768, 32767).astype(np.int16)
 
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
     tmp_path = Path(tmp.name)
@@ -67,11 +81,12 @@ def _save_audio_tmp(audio: dict) -> Path:
 
     try:
         import soundfile as sf
-        sf.write(str(tmp_path), arr, sr, subtype="FLOAT")
+        sf.write(str(tmp_path), arr_int16, sr, subtype="PCM_16")
     except ImportError:
-        import torchaudio
         import torch
-        torchaudio.save(str(tmp_path), torch.from_numpy(arr).unsqueeze(0), sr)
+        import torchaudio
+        torchaudio.save(str(tmp_path), torch.from_numpy(arr_int16).unsqueeze(0), sr,
+                        encoding="PCM_S", bits_per_sample=16)
 
     return tmp_path
 

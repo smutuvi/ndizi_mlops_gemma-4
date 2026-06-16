@@ -480,10 +480,10 @@ def build_litertlm_from_toml(toml_path: Path, output_litertlm: Path) -> None:
         builder,
         "toml",
         "--path",
-        str(toml_path),
+        str(toml_path.resolve()),
         "output",
         "--path",
-        str(output_litertlm),
+        str(output_litertlm.resolve()),
     ]
     print("[cmd]", " ".join(cmd), flush=True)
 

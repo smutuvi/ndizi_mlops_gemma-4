@@ -694,23 +694,37 @@ def build_toml_from_base(base_dump: Path, bundle_staging: Path) -> Path:
 
     # Strip prefer_activation_type from the prefill_decode section ONLY.
     # The community prefill_decode was exported as FP16; our finetuned replacement
-    # is dynamic_wi4_afp32 (FP32 activations).  Keeping fp16 hint causes the runtime
-    # to cast tensors to FP16, which produces garbage output from the FP32 model.
-    # vision_encoder is untouched (still community FP16 — correct for that section).
+    # is dynamic_wi4_afp32 (FP32 activations).  Keeping fp16 hint causes heap
+    # corruption (buffer size mismatch between FP16-allocated tensors and FP32 output).
+    # vision_encoder is untouched — it is still the community FP16 encoder.
     #
-    # IMPORTANT: use [^\n]* (not .*? with re.DOTALL) for the additional_metadata value.
-    # re.DOTALL + non-greedy .*? would expand across [[section]] boundaries and eat the
-    # entire vision block (vision_encoder + vision_adapter + end_of_vision) looking for
-    # the next "prefill_decode". [^\n]* stays on one line, so it only removes the single
-    # additional_metadata line immediately above model_type = "prefill_decode".
-    content = re.sub(
-        r"(\[\[section\]\]\n)"           # [[section]] header (no flags → . doesn't cross \n)
-        r"(additional_metadata[^\n]*\n)" # additional_metadata line (single line only)
-        r"(model_type\s*=\s*\"prefill_decode\")",  # immediately followed by model_type
-        r"\1\3",                          # drop the additional_metadata line
-        content,
-        # no re.DOTALL — keeps [^\n]* scoped to one line
-    )
+    # Approach: split on [[section]] boundaries and operate per-section so field
+    # ordering within a section doesn't matter.
+    sections = re.split(r"(\[\[section\]\])", content)
+    out_parts: list[str] = []
+    i = 0
+    while i < len(sections):
+        part = sections[i]
+        if part == "[[section]]" and i + 1 < len(sections):
+            body = sections[i + 1]
+            if re.search(r'model_type\s*=\s*"prefill_decode"', body):
+                # Remove the entire additional_metadata = [...] entry (single or multi-line).
+                # Single-line form:  additional_metadata = [...]\n
+                # Multi-line form:   additional_metadata = [\n  {...},\n]\n
+                body = re.sub(
+                    r"additional_metadata\s*=\s*\[[^\]]*\]\s*\n",
+                    "",
+                    body,
+                    flags=re.DOTALL,
+                )
+                print("[info] stripped additional_metadata (prefer_activation_type=fp16) "
+                      "from prefill_decode section")
+            out_parts.append(part + body)
+            i += 2
+        else:
+            out_parts.append(part)
+            i += 1
+    content = "".join(out_parts)
 
     bundle_toml = bundle_staging / "bundle.toml"
     bundle_toml.write_text(content, encoding="utf-8")

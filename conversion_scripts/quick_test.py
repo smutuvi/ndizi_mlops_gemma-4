@@ -57,14 +57,23 @@ ASR_INSTRUCTION = "Andika maneno unayosikia katika sauti hii."
 def _save_audio_tmp(audio: dict) -> Path:
     """Save a datasets-style audio dict to a temp WAV file, return the path."""
     import numpy as np
-    import scipy.io.wavfile as wav
 
     arr = np.asarray(audio["array"], dtype=np.float32)
     sr = int(audio.get("sampling_rate", 16000))
-    # scipy needs int16 or float32; litert_lm is happy with float32 WAV
+
     tmp = tempfile.NamedTemporaryFile(suffix=".wav", delete=False)
-    wav.write(tmp.name, sr, arr)
-    return Path(tmp.name)
+    tmp_path = Path(tmp.name)
+    tmp.close()
+
+    try:
+        import soundfile as sf
+        sf.write(str(tmp_path), arr, sr, subtype="FLOAT")
+    except ImportError:
+        import torchaudio
+        import torch
+        torchaudio.save(str(tmp_path), torch.from_numpy(arr).unsqueeze(0), sr)
+
+    return tmp_path
 
 
 # ── Chat test ─────────────────────────────────────────────────────────────────

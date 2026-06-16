@@ -692,46 +692,18 @@ def build_toml_from_base(base_dump: Path, bundle_staging: Path) -> Path:
         flags=re.DOTALL | re.MULTILINE,
     )
 
-    # Strip prefer_activation_type from the prefill_decode section ONLY.
-    # The community prefill_decode was exported as FP16; our finetuned replacement
-    # is dynamic_wi4_afp32 (FP32 activations).  Keeping fp16 hint causes heap
-    # corruption (buffer size mismatch between FP16-allocated tensors and FP32 output).
-    # vision_encoder is untouched — it is still the community FP16 encoder.
-    #
-    # Approach: split on [[section]] boundaries and operate per-section so field
-    # ordering within a section doesn't matter.
-    sections = re.split(r"(\[\[section\]\])", content)
-    out_parts: list[str] = []
-    i = 0
-    while i < len(sections):
-        part = sections[i]
-        if part == "[[section]]" and i + 1 < len(sections):
-            body = sections[i + 1]
-            if re.search(r'model_type\s*=\s*"prefill_decode"', body):
-                # Remove the entire additional_metadata = [...] entry (single or multi-line).
-                # Single-line form:  additional_metadata = [...]\n
-                # Multi-line form:   additional_metadata = [\n  {...},\n]\n
-                body = re.sub(
-                    r"additional_metadata\s*=\s*\[[^\]]*\]\s*\n",
-                    "",
-                    body,
-                    flags=re.DOTALL,
-                )
-                print("[info] stripped additional_metadata (prefer_activation_type=fp16) "
-                      "from prefill_decode section")
-            out_parts.append(part + body)
-            i += 2
-        else:
-            out_parts.append(part)
-            i += 1
-    content = "".join(out_parts)
+    # NOTE: prefer_activation_type = "fp16" is intentionally preserved in the
+    # prefill_decode section. The community shell (embedder, audio encoder, vision)
+    # produces FP16 tensors. Our finetuned LLM must also use FP16 activations
+    # (exported with dynamic_wi4_afp16) so the tensor interface matches.
+    # Do NOT strip this flag — the shell and LLM must agree on activation dtype.
 
     bundle_toml = bundle_staging / "bundle.toml"
     bundle_toml.write_text(content, encoding="utf-8")
     print(
         "[info] bundle.toml built from community model.toml\n"
         "       SP_Tokenizer + backend_constraint + audio/vision metadata preserved\n"
-        "       prefer_activation_type stripped from prefill_decode (FP32 export)"
+        "       prefer_activation_type=fp16 preserved for shell/LLM dtype match"
     )
     print(f"\n[toml] {bundle_toml}\n{bundle_toml.read_text()}")
     return bundle_toml

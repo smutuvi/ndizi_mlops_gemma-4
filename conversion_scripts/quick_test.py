@@ -149,29 +149,46 @@ def test_asr_datasets(model: str, datasets: list[str], n: int) -> bool:
     print("ASR TEST — dataset samples")
     print(f"{'═'*60}")
     try:
-        import litert_lm
         import datasets as hf_datasets
+        import litert_lm
 
+        # ── Phase 1: load all audio and save to temp files BEFORE opening Engine ──
+        # Loading datasets/soundfile/torchaudio C++ libs inside the Engine context
+        # causes allocator conflicts (malloc corruption). Pre-save everything first.
+        samples: list[tuple[Path, str, str]] = []  # (tmp_wav, ref, dataset_label)
+        for spec in datasets:
+            repo, _, split = spec.partition(":")
+            split = split or "test"
+            label = f"{repo} [{split}]"
+            print(f"\n  Loading: {label}  n={n}")
+            ds = hf_datasets.load_dataset(repo, split=f"{split}[:{n}]")
+            for row in ds:
+                tmp = _save_audio_tmp(row["audio"])
+                ref = row.get("text", row.get("sentence", ""))
+                samples.append((tmp, ref, label))
+        print(f"\n  Saved {len(samples)} audio clips to temp files — opening Engine...")
+
+        # ── Phase 2: open Engine once and transcribe all pre-saved files ──
         litert_lm.set_min_log_severity(litert_lm.LogSeverity.ERROR)
-
-        with litert_lm.Engine(model, backend=litert_lm.Backend.CPU(),
-                               audio_backend=litert_lm.Backend.CPU()) as engine:
-            for spec in datasets:
-                repo, _, split = spec.partition(":")
-                split = split or "test"
-                print(f"\n  Dataset: {repo}  split={split}  n={n}")
-                print(f"  {'─'*50}")
-                ds = hf_datasets.load_dataset(repo, split=f"{split}[:{n}]")
-                for i, row in enumerate(ds):
-                    tmp = _save_audio_tmp(row["audio"])
-                    try:
-                        hyp = _transcribe_file(engine, tmp)
-                    finally:
-                        tmp.unlink(missing_ok=True)
-                    ref = row.get("text", row.get("sentence", ""))
-                    print(f"\n  Sample {i + 1}")
+        try:
+            with litert_lm.Engine(model, backend=litert_lm.Backend.CPU(),
+                                   audio_backend=litert_lm.Backend.CPU()) as engine:
+                current_label = None
+                idx = 0
+                for tmp, ref, label in samples:
+                    if label != current_label:
+                        print(f"\n  Dataset: {label}")
+                        print(f"  {'─'*50}")
+                        current_label = label
+                        idx = 0
+                    idx += 1
+                    hyp = _transcribe_file(engine, tmp)
+                    print(f"\n  Sample {idx}")
                     print(f"    REF: {ref}")
                     print(f"    HYP: {hyp}")
+        finally:
+            for tmp, _, _ in samples:
+                tmp.unlink(missing_ok=True)
 
         print("\n  ✓ ASR dataset test passed")
         return True

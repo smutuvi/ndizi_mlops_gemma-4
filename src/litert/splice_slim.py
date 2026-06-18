@@ -651,15 +651,14 @@ def _ensure_tokenizer(bundle_dir: Path, merged_model: str, ft_dump: Path | None 
 def build_toml_from_base(base_dump: Path, bundle_staging: Path) -> Path:
     """Build bundle.toml by adapting the community model.toml (dumped by litert-lm-peek).
 
-    The community model.toml already encodes every section correctly:
-      - SP_Tokenizer with correct .spiece path
-      - backend_constraint = "cpu" for audio/vision adapters
-      - additional_metadata (prefer_activation_type = "fp16") for vision/prefill
-    We preserve all of that and only replace the [system_metadata] block.
+    DEPRECATED: Use inject_audio_into_finetuned_toml() instead.
 
-    Since build_slim_bundle() copies the finetuned prefill_decode over the base
-    one *before* calling this function (same filename), the data_paths in the
-    community model.toml are still valid in bundle_staging.
+    This old approach starts from the community TOML and replaces the LLM file.
+    It causes garbage output because the community TOML has prefer_activation_type=fp16
+    (Google's model was exported with fp16 activations) but our model uses
+    dynamic_wi4_afp32 (fp32 activations) — a dtype mismatch.
+
+    Kept for reference only.
     """
     base_toml = base_dump / "model.toml"
     if not base_toml.exists():
@@ -671,7 +670,6 @@ def build_toml_from_base(base_dump: Path, bundle_staging: Path) -> Path:
 
     content = base_toml.read_text(encoding="utf-8")
 
-    # Replace the [system_metadata] ... ] block with our custom metadata.
     custom_meta = (
         "[system_metadata]\n"
         "entries = [\n"
@@ -692,18 +690,140 @@ def build_toml_from_base(base_dump: Path, bundle_staging: Path) -> Path:
         flags=re.DOTALL | re.MULTILINE,
     )
 
-    # NOTE: prefer_activation_type = "fp16" is intentionally preserved in the
-    # prefill_decode section. The community shell (embedder, audio encoder, vision)
-    # produces FP16 tensors. Our finetuned LLM must also use FP16 activations
-    # (exported with dynamic_wi4_afp16) so the tensor interface matches.
-    # Do NOT strip this flag — the shell and LLM must agree on activation dtype.
-
     bundle_toml = bundle_staging / "bundle.toml"
     bundle_toml.write_text(content, encoding="utf-8")
+    print(f"\n[toml] {bundle_toml}\n{bundle_toml.read_text()}")
+    return bundle_toml
+
+
+def inject_audio_into_finetuned_toml(
+    ft_dump: Path,
+    community_dump: Path,
+    bundle_staging: Path,
+) -> Path:
+    """Build bundle.toml starting from the finetuned export's model.toml.
+
+    CORRECT splice direction:
+      - Our export's TOML is used as-is (correct dtype for dynamic_wi4_afp32,
+        no spurious prefer_activation_type=fp16 that only applies to Google's
+        fp16-exported model).
+      - Audio sections (AUDIO_ENCODER_HW, AUDIO_ADAPTER, END_OF_AUDIO) are
+        extracted from the community shell dump and appended, preserving their
+        backend_constraint and other metadata exactly as Google set them.
+
+    This avoids the dtype mismatch that caused garbage chat output when starting
+    from the community TOML (which was written for Google's fp16 model).
+    """
+    AUDIO_TYPES = {"AUDIO_ENCODER_HW", "AUDIO_ADAPTER", "END_OF_AUDIO"}
+
+    # ── Read our export's model.toml ─────────────────────────────────────────
+    ft_toml_path = ft_dump / "model.toml"
+    if not ft_toml_path.exists():
+        raise FileNotFoundError(
+            f"No model.toml in finetuned export dump: {ft_dump}\n"
+            "litert-lm-peek ≥1.4 dumps model.toml; upgrade litert-lm-builder/peek."
+        )
+    ft_toml = ft_toml_path.read_text(encoding="utf-8")
+
+    # ── Read community model.toml to extract audio section blocks ────────────
+    comm_toml_path = community_dump / "model.toml"
+    if not comm_toml_path.exists():
+        raise FileNotFoundError(
+            f"No model.toml in community dump: {community_dump}\n"
+            "litert-lm-peek ≥1.4 dumps model.toml; upgrade litert-lm-builder/peek."
+        )
+    comm_toml = comm_toml_path.read_text(encoding="utf-8")
+
+    # ── Parse community TOML for audio [[section]] blocks ───────────────────
+    # Split on [[section]] boundaries (each block starts with [[section]])
+    raw_blocks = re.split(r"(?=\[\[section\]\])", comm_toml)
+    audio_blocks: list[str] = []
+    for block in raw_blocks:
+        if "[[section]]" not in block:
+            continue
+        mt = re.search(r'model_type\s*=\s*["\']?(\w+)["\']?', block, re.I)
+        if mt and mt.group(1).upper() in AUDIO_TYPES:
+            audio_blocks.append(block.strip())
+
+    if not audio_blocks:
+        print(
+            "[warn] No audio sections (AUDIO_ENCODER_HW / AUDIO_ADAPTER / END_OF_AUDIO) "
+            "found in community model.toml — ASR will not work in the bundle."
+        )
+    else:
+        print(f"[info] Found {len(audio_blocks)} audio section(s) in community shell")
+
+    # ── Copy audio .tflite files into bundle_staging, fix data_paths ─────────
+    updated_audio_blocks: list[str] = []
+    for block in audio_blocks:
+        dp_match = re.search(r'data_path\s*=\s*["\']([^"\']+)["\']', block)
+        if not dp_match:
+            print(f"[warn] Audio block has no data_path — skipping: {block[:80]}")
+            continue
+
+        orig_rel = dp_match.group(1)
+        src = community_dump / orig_rel
+        if not src.exists():
+            # litert-lm-peek may use a sub-dir; search recursively
+            hits = list(community_dump.rglob(Path(orig_rel).name))
+            if hits:
+                src = hits[0]
+            else:
+                print(f"[warn] Audio file not found: {orig_rel} — skipping section")
+                continue
+
+        dst = bundle_staging / src.name
+        shutil.copy2(src, dst)
+        print(f"[info] Copied audio section: {src.name}")
+
+        # Update data_path to filename-only (flat in bundle_staging)
+        updated_block = re.sub(
+            r'(data_path\s*=\s*)["\'][^"\']+["\']',
+            f'\\1"{src.name}"',
+            block,
+        )
+        updated_audio_blocks.append(updated_block)
+
+    # ── Update system_metadata in our TOML ───────────────────────────────────
+    custom_meta = (
+        "[system_metadata]\n"
+        "entries = [\n"
+        '  { key = "author", value_type = "String", value = "smutuvi/ndizi" },\n'
+        '  { key = "base_litert", value_type = "String",'
+        ' value = "litert-community/gemma-4-E2B-it-litert-lm" },\n'
+        '  { key = "finetune", value_type = "String",'
+        ' value = "smutuvi/gemma-4-e2b-sw-asr-ndizi-merged" },\n'
+        '  { key = "bundle_kind", value_type = "String",'
+        ' value = "finetuned_export_plus_audio" },\n'
+        "]"
+    )
+    if "[system_metadata]" in ft_toml:
+        ft_toml_updated = re.sub(
+            r"\[system_metadata\].*?^\]",
+            custom_meta,
+            ft_toml,
+            count=1,
+            flags=re.DOTALL | re.MULTILINE,
+        )
+    else:
+        # Export didn't include system_metadata — prepend it
+        ft_toml_updated = custom_meta + "\n\n" + ft_toml
+
+    # ── Append audio section blocks ───────────────────────────────────────────
+    if updated_audio_blocks:
+        ft_toml_updated = ft_toml_updated.rstrip() + "\n\n"
+        ft_toml_updated += "\n\n".join(updated_audio_blocks) + "\n"
+        print(
+            f"[info] Appended {len(updated_audio_blocks)} audio section(s) to bundle.toml\n"
+            "       (backend_constraint and other metadata preserved from community shell)"
+        )
+
+    # ── Write bundle.toml ─────────────────────────────────────────────────────
+    bundle_toml = bundle_staging / "bundle.toml"
+    bundle_toml.write_text(ft_toml_updated, encoding="utf-8")
     print(
-        "[info] bundle.toml built from community model.toml\n"
-        "       SP_Tokenizer + backend_constraint + audio/vision metadata preserved\n"
-        "       prefer_activation_type=fp16 preserved for shell/LLM dtype match"
+        "[info] bundle.toml built from finetuned export model.toml + community audio sections\n"
+        "       dtype: dynamic_wi4_afp32 (fp32 activations) — no fp16 mismatch"
     )
     print(f"\n[toml] {bundle_toml}\n{bundle_toml.read_text()}")
     return bundle_toml
@@ -750,30 +870,25 @@ def build_slim_bundle(
     ft_dump = work_dir / "finetuned_unpack"
     peek_unpack(ft_litertlm, ft_dump)
 
-    base_prefill = find_prefill_decode_tflite(base_dump)
-    ft_prefill = find_prefill_decode_tflite(ft_dump)
-    print(f"Replace prefill_decode:\n  base: {base_prefill}\n  with: {ft_prefill}")
-    shutil.copy2(ft_prefill, base_prefill)
-
+    # ── New splice direction: start from our export, add community audio ──────
+    # We use our finetuned export's model.toml as the TOML base (correct dtype
+    # for dynamic_wi4_afp32, no spurious prefer_activation_type=fp16).
+    # Audio sections (AUDIO_ENCODER_HW, AUDIO_ADAPTER, END_OF_AUDIO) are
+    # injected from the community shell dump.
+    #
+    # OLD approach (causes garbage chat): community TOML + replace LLM .tflite
+    # NEW approach (correct):            our export TOML + append audio sections
     bundle_dir = work_dir / "bundle_staging"
     if bundle_dir.exists():
         shutil.rmtree(bundle_dir)
-    shutil.copytree(base_dump, bundle_dir)
+    shutil.copytree(ft_dump, bundle_dir)
 
-    # Build TOML from the community model.toml (preserves SP_Tokenizer, backend_constraint,
-    # additional_metadata etc.) — falls back to inventory-based approach if model.toml absent.
-    if (base_dump / "model.toml").exists():
-        toml_path = build_toml_from_base(base_dump, bundle_dir)
-    else:
-        print("[warn] model.toml not found in base_dump — falling back to filename-based inventory")
-        sections = inventory_from_dump(bundle_dir, base_log)
-        manifest = work_dir / "bundle_manifest.json"
-        manifest.write_text(
-            json.dumps([{**asdict(s), "data_path": str(s.data_path)} for s in sections], indent=2),
-            encoding="utf-8",
+    if not (ft_dump / "model.toml").exists():
+        raise FileNotFoundError(
+            f"No model.toml in finetuned export dump: {ft_dump}\n"
+            "litert-lm-peek ≥1.4 dumps model.toml; upgrade litert-lm-builder/peek."
         )
-        toml_path = bundle_dir / "bundle.toml"
-        write_bundle_toml(sections, toml_path)
+    toml_path = inject_audio_into_finetuned_toml(ft_dump, base_dump, bundle_dir)
 
     output_litertlm = work_dir / output_name
     build_litertlm_from_toml(toml_path, output_litertlm)

@@ -219,7 +219,9 @@ def run_finetuned_export(
         f"--quantization_recipe={quantization}",
         "--externalize_embedder=True",
         "--bundle_litert_lm=True",
-        "--use_jinja_template=True",
+        "--use_jinja_template=False",  # Use community LlmMetadata's template (compatible with litert_lm).
+        # Our model's tokenizer_config.json uses map.get() which litert_lm's Jinja engine
+        # does not support — embedding it causes a silent template failure and garbage output.
         "--litert_lm_model_type_override=gemma4",
         "--export_vision_encoder=False",
         "--keep_temporary_files=True",

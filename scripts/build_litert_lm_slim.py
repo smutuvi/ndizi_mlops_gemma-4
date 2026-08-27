@@ -102,8 +102,9 @@ def main() -> int:
         metavar="HF_REPO_OR_NONE",
         help=(
             "HF repo whose litert-lm bundle provides the Jinja chat template. "
-            "Pass 'none' to use the model's own tokenizer template (needed for "
-            "custom templates like Sunbird). "
+            "Pass 'none' to use the model's own tokenizer template. "
+            "Pass 'sunbird' to use the built-in Minja-compatible Sunbird template "
+            "(fixes echo/empty responses from Sunflower-Gemma4-E2B). "
             f"Default: {DEFAULT_JINJA_OVERRIDE}"
         ),
     )
@@ -139,9 +140,12 @@ def main() -> int:
     )
 
     args = p.parse_args()
-    # Allow --jinja-template-override none to disable the override (use model's own template)
-    if args.jinja_template_override.lower() == "none":
+    # Normalise special keyword values
+    _jto = args.jinja_template_override.lower()
+    if _jto == "none":
         args.jinja_template_override = None
+    elif _jto == "sunbird":
+        args.jinja_template_override = "sunbird"  # handled inside run_finetuned_export
     run_build(args)
     return 0
 

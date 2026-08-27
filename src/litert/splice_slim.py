@@ -18,6 +18,41 @@ BASE_LITERT_FILE = "gemma-4-E2B-it.litertlm"
 # Google's community bundle ships a compatible Jinja template — use it as override.
 JINJA_CHAT_TEMPLATE_OVERRIDE = BASE_LITERT_REPO
 
+# Sunbird/Sunflower-Gemma4-E2B uses <|turn> / <turn|> tokens (not Gemma's
+# <start_of_turn>/<end_of_turn>).  Its full tokenizer template also calls
+# dict.get(), which Minja rejects.  This is a simplified, Minja-compatible
+# version that preserves the essential turn format for chat (no tool-calls).
+SUNBIRD_JINJA_TEMPLATE = (
+    "{{- bos_token -}}\n"
+    "{%- if messages[0]['role'] in ['system', 'developer'] -%}\n"
+    "<|turn>system\n"
+    "{%- if messages[0]['content'] is string -%}\n"
+    "{{ messages[0]['content'] | trim }}"
+    "{%- else -%}\n"
+    "{%- for item in messages[0]['content'] -%}{{ item['text'] | trim }} {%- endfor -%}\n"
+    "{%- endif -%}\n"
+    "<turn|>\n"
+    "{%- set loop_messages = messages[1:] -%}\n"
+    "{%- else -%}\n"
+    "{%- set loop_messages = messages -%}\n"
+    "{%- endif -%}\n"
+    "{%- for message in loop_messages -%}\n"
+    "{%- set role = 'model' if message['role'] == 'assistant' else message['role'] -%}\n"
+    "<|turn>{{ role }}\n"
+    "{%- if message['content'] is string -%}\n"
+    "{{ message['content'] | trim }}"
+    "{%- else -%}\n"
+    "{%- for item in message['content'] -%}\n"
+    "{%- if item['type'] == 'text' -%}{{ item['text'] | trim }}{%- endif -%}\n"
+    "{%- endfor -%}\n"
+    "{%- endif -%}\n"
+    "<turn|>\n"
+    "{%- endfor -%}\n"
+    "{%- if add_generation_prompt -%}\n"
+    "<|turn>model\n"
+    "{%- endif -%}\n"
+)
+
 DEFAULT_BASE_MODEL = "google/gemma-4-E2B-it"
 DEFAULT_ADAPTER = "smutuvi/gemma-4-e2b-sw-asr-ndizi"
 DEFAULT_MERGED_MODEL = "smutuvi/gemma-4-e2b-sw-asr-ndizi-merged"
@@ -195,6 +230,18 @@ def find_prefill_decode_tflite(root: Path) -> Path:
     return best
 
 
+def _write_template_override_dir(template: str, work_dir: Path) -> Path:
+    """Write a minimal tokenizer_config.json with the given Jinja chat template
+    to a local directory, which can then be passed as --jinja_chat_template_override
+    to export_hf (it accepts local paths via AutoTokenizer.from_pretrained)."""
+    import json
+    tdir = work_dir / "template_override"
+    tdir.mkdir(parents=True, exist_ok=True)
+    config = {"chat_template": template, "tokenizer_class": "PreTrainedTokenizerFast"}
+    (tdir / "tokenizer_config.json").write_text(json.dumps(config, indent=2))
+    return tdir
+
+
 def run_finetuned_export(
     merged_model: str,
     export_dir: Path,
@@ -215,6 +262,13 @@ def run_finetuned_export(
         shutil.rmtree(export_dir)
         export_dir.mkdir(parents=True)
 
+    # Resolve "sunbird" keyword → write Minja-compatible template to a local dir
+    resolved_override = jinja_template_override
+    if jinja_template_override == "sunbird":
+        tdir = _write_template_override_dir(SUNBIRD_JINJA_TEMPLATE, export_dir.parent)
+        resolved_override = str(tdir)
+        print(f"[info] Using Sunbird Minja-compatible template override: {tdir}", flush=True)
+
     cmd = [
         sys.executable,
         "-m",
@@ -230,8 +284,8 @@ def run_finetuned_export(
         # jinja_template_override=None to let export_hf read the model's own
         # template (needed for models with custom templates, e.g. Sunbird).
         *(
-            [f"--jinja_chat_template_override={jinja_template_override}"]
-            if jinja_template_override is not None
+            [f"--jinja_chat_template_override={resolved_override}"]
+            if resolved_override is not None
             else ["--use_jinja_template=True"]
         ),
         "--litert_lm_model_type_override=gemma4",

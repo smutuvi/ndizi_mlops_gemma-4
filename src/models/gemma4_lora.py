@@ -83,24 +83,145 @@ def _is_bnb_4bit_linear(module: Any) -> bool:
 
 
 def ensure_linear4bit_quant_state(model: Any) -> int:
-    """Call ``.to(cuda)`` on 4-bit linears whose ``quant_state`` was never built."""
+    """Call ``.to(cuda)`` on packed 4-bit linears whose ``quant_state`` was never built.
+
+    Unpacked weights (``shape[1] != 1``) are dummy KV-shared ``k_proj``/``v_proj``
+    that Sunflower does not store — ``.to(cuda)`` cannot recover those. See
+    ``repair_kv_shared_dummy_projections``.
+    """
     import torch
 
     if not torch.cuda.is_available():
         return 0
     device = torch.device("cuda", torch.cuda.current_device())
     n = 0
+    skipped_unpacked = 0
     for module in model.modules():
         if not _is_bnb_4bit_linear(module):
             continue
         weight = getattr(module, "weight", None)
         if weight is None or getattr(weight, "quant_state", None) is not None:
             continue
+        if getattr(weight, "ndim", 0) == 2 and int(weight.shape[1]) != 1:
+            skipped_unpacked += 1
+            continue
         module.to(device)
         n += 1
+    if skipped_unpacked:
+        logger.info(
+            "Left %d unpacked Linear4bit modules for KV-shared repair (not packed NF4)",
+            skipped_unpacked,
+        )
     if n:
         logger.info("Initialized bitsandbytes quant_state on %d Linear4bit modules", n)
     return n
+
+
+def _iter_text_self_attn(model: Any):
+    for name, module in model.named_modules():
+        if "audio_tower" in name or "vision_tower" in name:
+            continue
+        if getattr(module, "q_proj", None) is None:
+            continue
+        if getattr(module, "layer_idx", None) is None:
+            continue
+        yield name, module
+
+
+def _linear_weight_bf16(src: Any, device):
+    """Materialize an nn.Linear in bf16 from a (possibly 4-bit) donor projection."""
+    import torch
+    import torch.nn as nn
+
+    weight = src.weight
+    quant_state = getattr(weight, "quant_state", None)
+    if quant_state is not None:
+        import bitsandbytes.functional as bnb_f
+
+        data = bnb_f.dequantize_4bit(weight, quant_state)
+    else:
+        data = weight.detach().float()
+    if data.ndim != 2 or int(data.shape[1]) == 1:
+        raise ValueError(f"Cannot convert projection with shape {tuple(data.shape)} to nn.Linear")
+    out_f, in_f = int(data.shape[0]), int(data.shape[1])
+    has_bias = getattr(src, "bias", None) is not None
+    lin = nn.Linear(in_f, out_f, bias=has_bias)
+    lin.weight.data.copy_(data.to(dtype=torch.bfloat16))
+    if has_bias:
+        lin.bias.data.copy_(src.bias.detach().to(dtype=torch.bfloat16))
+    lin.requires_grad_(False)
+    return lin.to(device=device, dtype=torch.bfloat16)
+
+
+def repair_kv_shared_dummy_projections(model: Any) -> int:
+    """Replace randomly-initialized KV-shared k/v projections with the last real donor.
+
+    Sunflower omits ``k_proj``/``v_proj``/``k_norm`` on trailing KV-shared layers.
+    Some transformers builds still construct them; bitsandbytes then 4-bit-inits
+    unpacked tensors and crashes on the first ``k_proj`` forward
+    (``assert module.weight.shape[1] == 1``). Newer modeling skips those modules
+    when ``is_kv_shared_layer`` is set; older modeling still calls ``k_proj``, so
+    we copy the last non-shared layer of the same attention type as bf16.
+    """
+    import copy
+
+    num_kv = _get_num_kv_shared_layers(model)
+    total = _count_decoder_layers(model)
+    first_shared = total - num_kv if num_kv > 0 else None
+
+    dummy_idxs: list[int] = []
+    for _name, attn in _iter_text_self_attn(model):
+        kp = getattr(attn, "k_proj", None)
+        weight = getattr(kp, "weight", None) if kp is not None else None
+        if (
+            weight is not None
+            and getattr(weight, "quant_state", None) is None
+            and getattr(weight, "ndim", 0) == 2
+            and int(weight.shape[1]) != 1
+        ):
+            dummy_idxs.append(int(attn.layer_idx))
+    if dummy_idxs:
+        inferred = min(dummy_idxs)
+        if first_shared is None or inferred < first_shared:
+            first_shared = inferred
+
+    if first_shared is None:
+        return 0
+    device = next(p.device for p in model.parameters() if p.device.type != "meta")
+
+    donors: dict[str, Any] = {}
+    n_replaced = 0
+    for _name, attn in sorted(_iter_text_self_attn(model), key=lambda kv: int(kv[1].layer_idx)):
+        idx = int(attn.layer_idx)
+        layer_type = str(getattr(attn, "layer_type", None) or "default")
+        if idx < first_shared:
+            donors[layer_type] = attn
+            continue
+        attn.is_kv_shared_layer = True
+        donor = donors.get(layer_type) or (next(iter(donors.values())) if donors else None)
+        if donor is None:
+            logger.warning("No KV donor for shared attention layer %d", idx)
+            continue
+        if getattr(attn, "k_proj", None) is not None and getattr(donor, "k_proj", None) is not None:
+            attn.k_proj = _linear_weight_bf16(donor.k_proj, device)
+            n_replaced += 1
+        if getattr(attn, "v_proj", None) is not None and getattr(donor, "v_proj", None) is not None:
+            attn.v_proj = _linear_weight_bf16(donor.v_proj, device)
+            n_replaced += 1
+        if getattr(donor, "k_norm", None) is not None and getattr(attn, "k_norm", None) is not None:
+            attn.k_norm = copy.deepcopy(donor.k_norm).to(device)
+        if getattr(donor, "v_norm", None) is not None and getattr(attn, "v_norm", None) is not None:
+            attn.v_norm = copy.deepcopy(donor.v_norm).to(device)
+
+    if n_replaced:
+        logger.info(
+            "Repaired %d KV-shared k/v projections (layers %d–%d of %d) from last donor",
+            n_replaced,
+            first_shared,
+            total - 1,
+            total,
+        )
+    return n_replaced
 
 
 def align_gemma4_multimodal_dtypes(model: Any, *, dtype=None) -> None:

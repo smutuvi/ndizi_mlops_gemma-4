@@ -23,6 +23,7 @@ from src.models.gemma4_lora import (
     patch_clippable_linear_for_peft,
     patch_masked_scatter_dtype_compat,
     qlora_device_map,
+    repair_kv_shared_dummy_projections,
     rewrite_adapter_config_for_kv_shared,
     save_projector_checkpoint,
 )
@@ -161,6 +162,9 @@ def run_train(cli_args) -> None:
             device_map="auto",
             attn_implementation="sdpa",
         )
+        n_kv = repair_kv_shared_dummy_projections(model)
+        if n_kv:
+            print(f"[train] Repaired {n_kv} dummy KV-shared k/v projections")
         model = freeze_lm_decoder(model)
         model.train()
     else:
@@ -185,6 +189,12 @@ def run_train(cli_args) -> None:
         model = AutoModelForMultimodalLM.from_pretrained(rt.base_model_id, **load_kw)
         if getattr(model.config, "use_cache", None):
             model.config.use_cache = False
+        n_kv = repair_kv_shared_dummy_projections(model)
+        if n_kv:
+            print(
+                f"[train] Repaired {n_kv} dummy KV-shared k/v projections "
+                "(Sunflower checkpoint omits them; 4-bit init was crashing k_proj)"
+            )
         if use_4bit:
             n_qs = ensure_linear4bit_quant_state(model)
             if n_qs:

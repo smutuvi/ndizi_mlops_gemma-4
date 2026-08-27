@@ -60,6 +60,49 @@ def build_gemma4_bnb_config(*, compute_dtype=None):
     )
 
 
+def qlora_device_map():
+    """Pin QLoRA to one CUDA device.
+
+    ``device_map="auto"`` plus ``dtype=`` unpacks Linear4bit weights, which then fail on the
+    first forward with ``FP4 quantization state not initialized`` /
+    ``assert module.weight.shape[1] == 1`` (often on ``k_proj``).
+    """
+    import torch
+
+    if not torch.cuda.is_available():
+        raise RuntimeError("4-bit QLoRA requires CUDA. Pass --no-4bit to train in bf16 on CPU.")
+    return {"": int(torch.cuda.current_device())}
+
+
+def _is_bnb_4bit_linear(module: Any) -> bool:
+    name = type(module).__name__
+    if name in ("Linear4bit", "LinearFP4", "LinearNF4"):
+        return True
+    mod = module.__class__.__module__
+    return mod.startswith("bitsandbytes.nn") and "Linear" in name
+
+
+def ensure_linear4bit_quant_state(model: Any) -> int:
+    """Call ``.to(cuda)`` on 4-bit linears whose ``quant_state`` was never built."""
+    import torch
+
+    if not torch.cuda.is_available():
+        return 0
+    device = torch.device("cuda", torch.cuda.current_device())
+    n = 0
+    for module in model.modules():
+        if not _is_bnb_4bit_linear(module):
+            continue
+        weight = getattr(module, "weight", None)
+        if weight is None or getattr(weight, "quant_state", None) is not None:
+            continue
+        module.to(device)
+        n += 1
+    if n:
+        logger.info("Initialized bitsandbytes quant_state on %d Linear4bit modules", n)
+    return n
+
+
 def align_gemma4_multimodal_dtypes(model: Any, *, dtype=None) -> None:
     """
     Cast text/audio embedding paths to bf16 so Gemma4 masked_scatter dtypes match under QLoRA.
@@ -80,9 +123,13 @@ def align_gemma4_multimodal_dtypes(model: Any, *, dtype=None) -> None:
     )
     touched: list[str] = []
     for name, module in model.named_modules():
-        if any(k in name for k in keys):
-            module.to(dtype=dtype)
-            touched.append(name)
+        if not any(k in name for k in keys):
+            continue
+        # ``module.to(dtype=)`` unpacks Linear4bit children and drops quant_state.
+        if any(_is_bnb_4bit_linear(child) for child in module.modules()):
+            continue
+        module.to(dtype=dtype)
+        touched.append(name)
     if touched:
         logger.info(
             "Aligned %d multimodal module(s) to %s for masked_scatter (e.g. %s)",

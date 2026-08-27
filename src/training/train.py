@@ -18,9 +18,11 @@ from src.models.gemma4_lora import (
     build_asr_moderate_lora_config,
     build_gemma4_bnb_config,
     build_gemma4_lora_config,
+    ensure_linear4bit_quant_state,
     freeze_lm_decoder,
     patch_clippable_linear_for_peft,
     patch_masked_scatter_dtype_compat,
+    qlora_device_map,
     rewrite_adapter_config_for_kv_shared,
     save_projector_checkpoint,
 )
@@ -165,20 +167,33 @@ def run_train(cli_args) -> None:
         # asr_moderate or asr_max: 4-bit QLoRA
         if use_4bit:
             patch_masked_scatter_dtype_compat()
-        load_kw: dict = dict(
-            dtype=torch.bfloat16,
-            device_map="auto",
-            attn_implementation="sdpa",
-        )
+        load_kw: dict = dict(attn_implementation="sdpa")
         if use_4bit:
+            # Do not pass dtype= with BitsAndBytesConfig — it unpacks Params4bit
+            # ([out, in] instead of packed [out, 1]) and the first k_proj forward
+            # raises assert module.weight.shape[1] == 1.
             load_kw["quantization_config"] = build_gemma4_bnb_config()
-            print("[train] Loading base model with 4-bit QLoRA (audio_tower skipped; bf16 compute)")
+            load_kw["device_map"] = qlora_device_map()
+            print(
+                f"[train] Loading base model with 4-bit QLoRA "
+                f"(device_map={load_kw['device_map']}; audio_tower skipped; bf16 compute)"
+            )
         else:
+            load_kw["dtype"] = torch.bfloat16
+            load_kw["device_map"] = "auto"
             print("[train] Loading base model in bf16 (no 4-bit)")
         model = AutoModelForMultimodalLM.from_pretrained(rt.base_model_id, **load_kw)
+        if getattr(model.config, "use_cache", None):
+            model.config.use_cache = False
         if use_4bit:
+            n_qs = ensure_linear4bit_quant_state(model)
+            if n_qs:
+                print(f"[train] Initialized 4-bit quant_state on {n_qs} Linear4bit modules")
             model = prepare_model_for_kbit_training(model, use_gradient_checkpointing=True)
             align_gemma4_multimodal_dtypes(model)
+            n_qs = ensure_linear4bit_quant_state(model)
+            if n_qs:
+                print(f"[train] Re-initialized 4-bit quant_state after kbit prep ({n_qs} modules)")
 
         if training_mode == "asr_moderate":
             num_tail = int(getattr(cli_args, "tail_lora_layers", 6))
@@ -191,6 +206,10 @@ def run_train(cli_args) -> None:
 
         model = apply_gemma4_lora(model, lora, debug_targets=bool(getattr(cli_args, "debug_lora_targets", False)))
         model.print_trainable_parameters()
+        if use_4bit:
+            n_qs = ensure_linear4bit_quant_state(model)
+            if n_qs:
+                print(f"[train] Re-initialized 4-bit quant_state after LoRA ({n_qs} modules)")
 
     def compute_metrics(eval_pred):
         preds, labels = eval_pred

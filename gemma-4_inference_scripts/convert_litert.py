@@ -163,8 +163,9 @@ def convert_to_litert(
         export_vision_encoder=True,
         bundle_litert_lm=True,
         keep_temporary_files=False,
-        # Disable Jinja template — LiteRT runtime doesn't support dict.get() in Gemma-4 template
-        use_jinja_template=False,
+        # HF Gemma-4 templates use map.get(), which LiteRT-LM's Minja engine
+        # rejects. Google's community bundle ships a compatible Jinja template.
+        jinja_chat_template_override="litert-community/gemma-4-E2B-it-litert-lm",
     )
 
     bundle = _find_bundle(output_dir)

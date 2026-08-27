@@ -23,34 +23,30 @@ JINJA_CHAT_TEMPLATE_OVERRIDE = BASE_LITERT_REPO
 # dict.get(), which Minja rejects.  This is a simplified, Minja-compatible
 # version that preserves the essential turn format for chat (no tool-calls).
 SUNBIRD_JINJA_TEMPLATE = (
+    # Minja-compatible (no dict.get() calls, no block-if inside turn bodies).
+    # Produces: <bos><|turn>system\n{content}<turn|>\n<|turn>user\n{content}<turn|>\n<|turn>model\n
+    #
+    # Key whitespace rules used here:
+    #   {{- bos_token -}}         strips surrounding template whitespace
+    #   {%- tag -%}               strips before AND after the tag
+    #   {% tag -%}                strips ONLY after (keeps \n before)
+    #   {%- tag %}                strips ONLY before (keeps \n after)
+    #   Content inline ternary    avoids block-if eating newlines after role lines
     "{{- bos_token -}}\n"
+    "{%- set ns = namespace(loop_messages=messages) -%}\n"
     "{%- if messages[0]['role'] in ['system', 'developer'] -%}\n"
+    "{%- set ns.loop_messages = messages[1:] -%}\n"
     "<|turn>system\n"
-    "{%- if messages[0]['content'] is string -%}\n"
-    "{{ messages[0]['content'] | trim }}"
-    "{%- else -%}\n"
-    "{%- for item in messages[0]['content'] -%}{{ item['text'] | trim }} {%- endfor -%}\n"
-    "{%- endif -%}\n"
-    "<turn|>\n"
-    "{%- set loop_messages = messages[1:] -%}\n"
-    "{%- else -%}\n"
-    "{%- set loop_messages = messages -%}\n"
-    "{%- endif -%}\n"
-    "{%- for message in loop_messages -%}\n"
+    "{{ (messages[0]['content'] if messages[0]['content'] is string else messages[0]['content'][0]['text']) | trim }}<turn|>\n"
+    "{% endif -%}\n"
+    "{%- for message in ns.loop_messages -%}\n"
     "{%- set role = 'model' if message['role'] == 'assistant' else message['role'] -%}\n"
     "<|turn>{{ role }}\n"
-    "{%- if message['content'] is string -%}\n"
-    "{{ message['content'] | trim }}"
-    "{%- else -%}\n"
-    "{%- for item in message['content'] -%}\n"
-    "{%- if item['type'] == 'text' -%}{{ item['text'] | trim }}{%- endif -%}\n"
-    "{%- endfor -%}\n"
-    "{%- endif -%}\n"
-    "<turn|>\n"
-    "{%- endfor -%}\n"
+    "{{ (message['content'] if message['content'] is string else message['content'][0]['text']) | trim }}<turn|>\n"
+    "{% endfor -%}\n"
     "{%- if add_generation_prompt -%}\n"
     "<|turn>model\n"
-    "{%- endif -%}\n"
+    "{% endif %}\n"
 )
 
 DEFAULT_BASE_MODEL = "google/gemma-4-E2B-it"

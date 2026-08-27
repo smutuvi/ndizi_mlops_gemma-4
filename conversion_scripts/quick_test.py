@@ -96,6 +96,18 @@ def _save_audio_tmp(audio: dict) -> Path:
 DEFAULT_SYSTEM_PROMPT = "Wewe ni msaidizi wa lugha ya Kiswahili."
 
 
+def _chat_reply_ok(prompt: str, text: str) -> tuple[bool, str]:
+    """Return (ok, reason). Empty / echo / tiny replies are conversion bugs, not chat."""
+    t = (text or "").strip()
+    if not t:
+        return False, "empty reply"
+    if t.casefold() == prompt.strip().casefold():
+        return False, "echoed user prompt"
+    if len(t.split()) < 3:
+        return False, f"too short ({len(t.split())} words)"
+    return True, "ok"
+
+
 def test_chat(model: str, prompts: list[str], system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> bool:
     print(f"\n{'═'*60}")
     print("CHAT TEST")
@@ -106,16 +118,34 @@ def test_chat(model: str, prompts: list[str], system_prompt: str = DEFAULT_SYSTE
 
         litert_lm.set_min_log_severity(litert_lm.LogSeverity.ERROR)
 
+        failed: list[str] = []
+        # Fresh conversation per prompt so a bad first turn cannot poison the rest.
         with litert_lm.Engine(model, backend=litert_lm.Backend.CPU()) as engine:
-            with engine.create_conversation(messages=[
-                {"role": "system", "content": [{"type": "text",
-                 "text": system_prompt}]}
-            ]) as conv:
-                for i, prompt in enumerate(prompts, 1):
+            for i, prompt in enumerate(prompts, 1):
+                with engine.create_conversation(messages=[
+                    {"role": "system", "content": system_prompt}
+                ]) as conv:
                     print(f"\n  [{i}] User : {prompt}")
                     resp = conv.send_message(prompt)
-                    text = resp["content"][0]["text"]
+                    content = resp.get("content") or []
+                    text = content[0]["text"] if content else ""
                     print(f"       Bot  : {text}")
+                    ok, reason = _chat_reply_ok(prompt, text)
+                    if not ok:
+                        print(f"       ✗ {reason}")
+                        failed.append(f"[{i}] {reason}")
+
+        if failed:
+            print("\n  ✗ Chat failed quality checks:")
+            for item in failed:
+                print(f"      {item}")
+            print(
+                "\n  Hint: echo/empty/garbage usually means the bundle is missing the\n"
+                "  Gemma-4 chat template. Repair without re-exporting:\n"
+                "    python scripts/build_litert_lm_slim.py \\\n"
+                f"      --repair-template {model}"
+            )
+            return False
 
         print("\n  ✓ Chat passed")
         return True

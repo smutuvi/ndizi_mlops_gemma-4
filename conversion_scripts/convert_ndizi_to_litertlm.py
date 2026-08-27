@@ -261,6 +261,7 @@ def convert(model_source: str, token: str | None = None):
         f"--model={model_source}",
         f"--output_dir={OUTPUT_DIR}",
         "--externalize_embedder",   # ← memory-maps embeddings; essential for iPhone
+        "--jinja_chat_template_override=litert-community/gemma-4-E2B-it-litert-lm",
     ]
 
     run(cmd, env=env)

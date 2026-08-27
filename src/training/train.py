@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import inspect
+import json
 import os
 from pathlib import Path
 
@@ -23,10 +24,16 @@ from src.models.gemma4_lora import (
     rewrite_adapter_config_for_kv_shared,
     save_projector_checkpoint,
 )
-from src.training.collator import GemmaASRCollator
+from src.training.collator import GemmaASRCollator, GemmaMixedCollator
 from src.training.gemma_trainer import GemmaASRTrainer
 from src.training.retention import maybe_load_retention_replay_train
-from src.utils.constants import ASR_INSTRUCTION, SHORT_ASR_INSTRUCTION
+from src.utils.constants import (
+    AUDIO_COLUMN,
+    ASR_INSTRUCTION,
+    SHORT_ASR_INSTRUCTION,
+    SUNFLOWER_SYSTEM_PROMPT,
+    TARGET_SR,
+)
 from src.utils.paths import CHECKPOINT_DIR, PREPARED_LOCAL
 from src.utils.runtime import get_runtime
 
@@ -63,7 +70,7 @@ def run_train(cli_args) -> None:
     checkpoint_dir = Path(_out_dir) if _out_dir else CHECKPOINT_DIR
     checkpoint_dir.mkdir(parents=True, exist_ok=True)
 
-    dsd = load_from_disk(str(PREPARED_LOCAL))
+    dsd = load_from_disk(str(Path(getattr(cli_args, "prepared_dir", None) or PREPARED_LOCAL)))
     train_ds = dsd["train"]
 
     eval_max = int(getattr(cli_args, "eval_max_samples", 64))
@@ -84,6 +91,52 @@ def run_train(cli_args) -> None:
         train_ds = interleave_datasets(
             [train_ds, retention_train], probabilities=[p_dom, p_ret], seed=42
         )
+
+    chat_jsonl = getattr(cli_args, "chat_jsonl", None)
+    chat_ratio = float(getattr(cli_args, "chat_ratio", 0.0) or 0.0)
+    if chat_jsonl and chat_ratio > 0:
+        import numpy as np
+        from datasets import Dataset as HfDataset
+
+        path = Path(chat_jsonl)
+        if not path.is_file():
+            raise SystemExit(f"--chat-jsonl not found: {path}")
+        rows = []
+        for line in path.read_text(encoding="utf-8").splitlines():
+            line = line.strip()
+            if not line:
+                continue
+            rec = json.loads(line)
+            prompt = rec.get("prompt") or rec.get("instruction") or rec.get("user") or ""
+            response = rec.get("response") or rec.get("output") or rec.get("text") or ""
+            if not prompt or not response:
+                continue
+            rows.append((prompt, response))
+        if not rows:
+            raise SystemExit(f"--chat-jsonl has no valid prompt/response rows: {path}")
+        # interleave_datasets requires matching features — pad chat rows to the ASR schema.
+        if "prompt" not in train_ds.column_names:
+            train_ds = train_ds.add_column("prompt", [""] * len(train_ds))
+        dummy_audio = {
+            "array": np.zeros(int(0.16 * TARGET_SR), dtype=np.float32),
+            "sampling_rate": TARGET_SR,
+        }
+        proto = train_ds[0]
+        chat_rows = []
+        for prompt, response in rows:
+            row = {k: proto[k] for k in train_ds.column_names}
+            row["prompt"] = prompt
+            row["text"] = response
+            row["task"] = "chat"
+            row["source_dataset"] = "chat_jsonl"
+            if AUDIO_COLUMN in row:
+                row[AUDIO_COLUMN] = dummy_audio
+            chat_rows.append(row)
+        chat_ds = HfDataset.from_list(chat_rows).cast(train_ds.features)
+        p_chat = min(max(chat_ratio, 0.0), 0.5)
+        p_asr = 1.0 - p_chat
+        print(f"[train] chat mix enabled: chat_ratio={p_chat:.3f} (asr={p_asr:.3f}, n_chat={len(chat_ds)})")
+        train_ds = interleave_datasets([train_ds, chat_ds], probabilities=[p_asr, p_chat], seed=42)
 
     training_mode = getattr(cli_args, "training_mode", "asr_max")
     use_short_instruction = getattr(cli_args, "short_instruction", False)
@@ -204,11 +257,19 @@ def run_train(cli_args) -> None:
         ta_kw["metric_for_best_model"] = "wer"
     training_args = _training_arguments(**{**ta_kw, **strategy_kw})
 
+    collator = GemmaASRCollator(processor, instruction=asr_instruction)
+    if chat_jsonl and chat_ratio > 0:
+        collator = GemmaMixedCollator(
+            processor,
+            instruction=asr_instruction,
+            system_prompt=str(getattr(cli_args, "system_prompt", None) or SUNFLOWER_SYSTEM_PROMPT),
+        )
+
     trainer_kw = dict(
         model=model,
         args=training_args,
         train_dataset=train_ds,
-        data_collator=GemmaASRCollator(processor, instruction=asr_instruction),
+        data_collator=collator,
     )
     if eval_ds is not None:
         trainer_kw["eval_dataset"] = eval_ds

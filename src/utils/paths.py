@@ -9,6 +9,8 @@ ARTIFACTS_DIR.mkdir(exist_ok=True)
 
 PREPARED_LOCAL = ARTIFACTS_DIR / "prepared_dataset"
 RETENTION_PREPARED_LOCAL = ARTIFACTS_DIR / "retention_prepared_dataset"
+SUNFLOWER_PREPARED_LOCAL = ARTIFACTS_DIR / "prepared_sunflower_ndizi"
+SUNFLOWER_CHECKPOINT_DIR = ARTIFACTS_DIR / "checkpoints_sunflower_ndizi"
 CHECKPOINT_DIR = ARTIFACTS_DIR / "checkpoints"
 PREDICTIONS_DIR = ARTIFACTS_DIR / "predictions"
 BASELINE_JSON = ARTIFACTS_DIR / "baseline_results.json"

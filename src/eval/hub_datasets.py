@@ -13,13 +13,20 @@ from src.utils.constants import AUDIO_COLUMN, TARGET_SR, TEXT_COLUMN
 class SplitSpec:
     dataset_id: str
     split: str
+    config: str | None = None
 
     @classmethod
     def parse(cls, raw: str) -> SplitSpec:
-        if ":" not in raw:
-            return cls(raw.strip(), "test")
-        ds, sp = raw.split(":", 1)
-        return cls(ds.strip(), sp.strip())
+        """Parse ``repo:split`` or ``repo:config:split`` (e.g. google/fleurs:sw_ke:test)."""
+        s = raw.strip()
+        if ":" not in s:
+            return cls(s, "test")
+        parts = s.split(":")
+        if len(parts) == 2:
+            return cls(parts[0].strip(), parts[1].strip() or "test")
+        if len(parts) >= 3:
+            return cls(parts[0].strip(), parts[-1].strip() or "test", config=parts[1].strip() or None)
+        return cls(s, "test")
 
 
 def resolve_columns(column_names: list[str]) -> tuple[str, str]:
@@ -77,9 +84,13 @@ def load_hub_eval_splits(
     out: dict[str, Dataset] = {}
     for raw in specs:
         spec = SplitSpec.parse(raw)
-        key = f"{spec.dataset_id}:{spec.split}"
+        key = f"{spec.dataset_id}:{spec.config}:{spec.split}" if spec.config else f"{spec.dataset_id}:{spec.split}"
         print(f"[eval] Loading {key}...")
-        ds = load_dataset(spec.dataset_id, split=spec.split, **kw)
+        load_kw = dict(kw)
+        if spec.config:
+            ds = load_dataset(spec.dataset_id, spec.config, split=spec.split, **load_kw)
+        else:
+            ds = load_dataset(spec.dataset_id, split=spec.split, **load_kw)
         if audio_column and text_column:
             a_col, t_col = audio_column, text_column
         else:

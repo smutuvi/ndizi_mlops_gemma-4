@@ -2,6 +2,21 @@
 from __future__ import annotations
 
 SRC_DATASETS = ["smutuvi/ndizi-1", "smutuvi/ndizi-1-2025"]
+
+# Sunflower (Sunbird) leakage-safe Swahili recipe.
+SUNFLOWER_MODEL_ID = "Sunbird/Sunflower-Gemma4-E2B"
+SUNFLOWER_SYSTEM_PROMPT = (
+    "You are Sunflower, a helpful assistant made by Sunbird AI who knows many African languages."
+)
+# Train ASR only on Ndizi (plus optional de-duped ALFFA). Never FLEURS / CV / SALT / Waxal.
+SUNFLOWER_TRAIN_ASR = ["smutuvi/ndizi-1", "smutuvi/ndizi-1-2025"]
+SUNFLOWER_OPTIONAL_ASR = "nickdee96/ALFFA-Swahili-News"
+# Eval-only: Ndizi test is in-domain; FLEURS is OOD and must not be trained on.
+SUNFLOWER_EVAL_ASR = [
+    "smutuvi/ndizi-1:test",
+    "smutuvi/ndizi-1-2025:test",
+    "google/fleurs:sw_ke:test",
+]
 AUDIO_COLUMN = "audio"
 TEXT_COLUMN = "text"
 SPEAKER_COLUMN = "speaker_id"

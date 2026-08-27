@@ -28,6 +28,13 @@ Requires on PATH (conda ndizi):
   Note: size will match the existing bundle (~4-5 GB); use this to fix ASR
   without re-exporting. For the slim ~2.6 GB target, omit --skip-export.
 
+─── Repair chat template on an existing bundle (no re-export) ───────────────
+  python scripts/build_litert_lm_slim.py \\
+    --repair-template artifacts/litert_slim/sunflower-gemma4-e2b-litert-lm.litertlm
+
+  Replaces LlmMetadata with the community Gemma-4 Jinja template. Use this
+  when chat echoes the prompt, returns empty, or produces garbage.
+
 ─── Low-RAM official shell (phone OOM on >3 GB; stock ASR, not finetuned) ───
   python scripts/build_litert_lm_slim.py --official-shell --upload
 """
@@ -46,8 +53,11 @@ from src.litert.splice_slim import (  # noqa: E402
     DEFAULT_HUB_REPO,
     DEFAULT_MERGED_MODEL,
     DEFAULT_OUTPUT_NAME,
+    JINJA_CHAT_TEMPLATE_OVERRIDE,
     run_build,
 )
+
+DEFAULT_JINJA_OVERRIDE = JINJA_CHAT_TEMPLATE_OVERRIDE
 
 
 def main() -> int:
@@ -85,6 +95,18 @@ def main() -> int:
     p.add_argument("--hub-repo", default=DEFAULT_HUB_REPO, help="HF repo for --upload")
     p.add_argument("--quantization", default="dynamic_wi4_afp32",
                    help="Export quantization recipe for LLM slice (default: dynamic_wi4_afp32 = INT4)")
+    p.add_argument(
+        "--jinja-template-override",
+        dest="jinja_template_override",
+        default=DEFAULT_JINJA_OVERRIDE,
+        metavar="HF_REPO_OR_NONE",
+        help=(
+            "HF repo whose litert-lm bundle provides the Jinja chat template. "
+            "Pass 'none' to use the model's own tokenizer template (needed for "
+            "custom templates like Sunbird). "
+            f"Default: {DEFAULT_JINJA_OVERRIDE}"
+        ),
+    )
     p.add_argument("--cache-length", type=int, default=1024,
                    help="KV-cache length for export (default: 1024 — keeps TFLite under 2 GB FlatBuffers limit)")
     p.add_argument("--prefill-lengths", default="[64]",
@@ -107,8 +129,19 @@ def main() -> int:
         action="store_true",
         help="Copy litert-community E2B ~2.6 GB bundle (low RAM; stock ASR, not Ndizi-finetuned)",
     )
+    p.add_argument(
+        "--repair-template",
+        type=Path,
+        default=None,
+        help="Re-pack an existing .litertlm with the community Gemma-4 chat template "
+             "(no re-export). Fixes echo / empty / garbage chat from "
+             "use_jinja_template=False exports.",
+    )
 
     args = p.parse_args()
+    # Allow --jinja-template-override none to disable the override (use model's own template)
+    if args.jinja_template_override.lower() == "none":
+        args.jinja_template_override = None
     run_build(args)
     return 0
 

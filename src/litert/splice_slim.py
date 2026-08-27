@@ -14,6 +14,9 @@ from huggingface_hub import HfApi, hf_hub_download
 # Official on-device E2B shell (audio/embedder/tokenizer/metadata).
 BASE_LITERT_REPO = "litert-community/gemma-4-E2B-it-litert-lm"
 BASE_LITERT_FILE = "gemma-4-E2B-it.litertlm"
+# Gemma-4 HF templates use map.get(), which LiteRT-LM's Minja engine rejects.
+# Google's community bundle ships a compatible Jinja template — use it as override.
+JINJA_CHAT_TEMPLATE_OVERRIDE = BASE_LITERT_REPO
 
 DEFAULT_BASE_MODEL = "google/gemma-4-E2B-it"
 DEFAULT_ADAPTER = "smutuvi/gemma-4-e2b-sw-asr-ndizi"
@@ -199,6 +202,7 @@ def run_finetuned_export(
     quantization: str = "dynamic_wi4_afp32",
     cache_length: int = 1024,
     prefill_lengths: str = "[64]",
+    jinja_template_override: str | None = JINJA_CHAT_TEMPLATE_OVERRIDE,
 ) -> Path:
     """Export the merged model to a .litertlm bundle.
 
@@ -221,9 +225,15 @@ def run_finetuned_export(
         f"--quantization_recipe={quantization}",
         "--externalize_embedder=True",
         "--bundle_litert_lm=True",
-        "--use_jinja_template=False",  # Use community LlmMetadata's template (compatible with litert_lm).
-        # Our model's tokenizer_config.json uses map.get() which litert_lm's Jinja engine
-        # does not support — embedding it causes a silent template failure and garbage output.
+        # Gemma-4 HF template uses map.get() which Minja rejects; default is to
+        # override with the litert-community bundle template.  Pass
+        # jinja_template_override=None to let export_hf read the model's own
+        # template (needed for models with custom templates, e.g. Sunbird).
+        *(
+            [f"--jinja_chat_template_override={jinja_template_override}"]
+            if jinja_template_override is not None
+            else ["--use_jinja_template=True"]
+        ),
         "--litert_lm_model_type_override=gemma4",
         "--export_vision_encoder=False",
         "--keep_temporary_files=True",
@@ -470,6 +480,43 @@ def write_bundle_toml(sections: list[BundleSection], toml_path: Path) -> None:
 
     toml_path.write_text("\n".join(lines), encoding="utf-8")
     print(f"Wrote {toml_path}")
+
+
+def _find_llm_metadata(dump_dir: Path) -> Path | None:
+    """Return the largest LlmMetadata dump file, or None."""
+    cands = [
+        p for p in list(dump_dir.rglob("*.pbtext")) + list(dump_dir.rglob("*.pb"))
+        if "metadata" in p.name.lower() or "llm" in p.name.lower()
+    ]
+    if not cands:
+        return None
+    return max(cands, key=lambda p: p.stat().st_size)
+
+
+def copy_community_llm_metadata(dest_dump: Path, community_dump: Path) -> Path:
+    """Overwrite dest LlmMetadata with the community Gemma-4 chat template.
+
+    Keeps the dest filename so existing model.toml data_path entries stay valid.
+    """
+    src = _find_llm_metadata(community_dump)
+    if src is None:
+        raise FileNotFoundError(
+            f"No LlmMetadata in community dump: {community_dump}\n"
+            "Need the official Gemma-4 Jinja template from "
+            f"{BASE_LITERT_REPO}."
+        )
+    dst = _find_llm_metadata(dest_dump)
+    if dst is None:
+        dst = dest_dump / src.name
+        shutil.copy2(src, dst)
+        print(f"[info] Copied community LlmMetadata → {dst.name}")
+        return dst
+    shutil.copy2(src, dst)
+    print(
+        f"[info] Replaced {dst.name} with community LlmMetadata ({src.name})\n"
+        "       (LiteRT-compatible Gemma-4 Jinja template + stop tokens)"
+    )
+    return dst
 
 
 def build_litertlm_from_toml(toml_path: Path, output_litertlm: Path) -> None:
@@ -843,6 +890,7 @@ def build_slim_bundle(
     quantization: str = "dynamic_wi4_afp32",
     cache_length: int = 1024,
     prefill_lengths: str = "[64]",
+    jinja_template_override: str | None = JINJA_CHAT_TEMPLATE_OVERRIDE,
 ) -> Path:
     work_dir.mkdir(parents=True, exist_ok=True)
     base_dir = work_dir / "base"
@@ -867,6 +915,7 @@ def build_slim_bundle(
             quantization=quantization,
             cache_length=cache_length,
             prefill_lengths=prefill_lengths,
+            jinja_template_override=jinja_template_override,
         )
 
     print(f"Finetuned export bundle: {ft_litertlm} ({ft_litertlm.stat().st_size / 1e9:.2f} GB)")
@@ -886,6 +935,10 @@ def build_slim_bundle(
     if bundle_dir.exists():
         shutil.rmtree(bundle_dir)
     shutil.copytree(ft_dump, bundle_dir)
+    # Keep the model's own LlmMetadata when --jinja-template-override none
+    # (e.g. Sunbird). Only swap in the community template when an override is set.
+    if jinja_template_override is not None:
+        copy_community_llm_metadata(bundle_dir, base_dump)
 
     if not (ft_dump / "model.toml").exists():
         raise FileNotFoundError(
@@ -921,6 +974,61 @@ def build_official_shell_bundle(work_dir: Path, *, output_name: str = DEFAULT_OU
         "Use GPU/server ASR with smutuvi/gemma-4-e2b-sw-asr-ndizi-merged for Ndizi WER."
     )
     return output_litertlm
+
+
+def repair_bundle_template(
+    source_litertlm: Path,
+    work_dir: Path,
+    *,
+    output_name: str | None = None,
+) -> Path:
+    """Re-pack an existing .litertlm with the community Gemma-4 chat template.
+
+    Does not re-export weights. Use this when chat echoes / is empty / is
+    garbage because the bundle was exported with use_jinja_template=False.
+    """
+    source_litertlm = Path(source_litertlm).resolve()
+    if not source_litertlm.is_file():
+        raise FileNotFoundError(f"Bundle not found: {source_litertlm}")
+
+    work_dir.mkdir(parents=True, exist_ok=True)
+    base_dir = work_dir / "base"
+    base_litertlm = download_base_litertlm(base_dir)
+    base_dump = work_dir / "base_unpack"
+    peek_unpack(base_litertlm, base_dump)
+
+    src_dump = work_dir / "repair_unpack"
+    if src_dump.exists():
+        shutil.rmtree(src_dump)
+    peek_unpack(source_litertlm, src_dump)
+
+    bundle_dir = work_dir / "bundle_staging"
+    if bundle_dir.exists():
+        shutil.rmtree(bundle_dir)
+    shutil.copytree(src_dump, bundle_dir)
+    copy_community_llm_metadata(bundle_dir, base_dump)
+
+    toml_src = bundle_dir / "model.toml"
+    if not toml_src.exists():
+        raise FileNotFoundError(
+            f"No model.toml in {src_dump}. "
+            "litert-lm-peek ≥1.4 dumps model.toml; upgrade litert-lm-builder/peek."
+        )
+    toml_path = bundle_dir / "bundle.toml"
+    shutil.copy2(toml_src, toml_path)
+
+    output_name = output_name or source_litertlm.name
+    tmp_out = work_dir / (Path(output_name).stem + ".repaired.litertlm")
+    build_litertlm_from_toml(toml_path, tmp_out)
+
+    final = work_dir / output_name
+    if final.resolve() != tmp_out.resolve():
+        if final.exists():
+            final.unlink()
+        tmp_out.replace(final)
+    size_gb = final.stat().st_size / 1e9
+    print(f"Repaired template: {final} ({size_gb:.2f} GB)")
+    return final
 
 
 def write_readme_official_shell(work_dir: Path, repo_id: str, filename: str) -> None:
@@ -961,6 +1069,16 @@ def run_build(args) -> None:
     from src.utils.paths import ARTIFACTS_DIR
 
     work_dir = Path(getattr(args, "work_dir", None) or ARTIFACTS_DIR / "litert_slim")
+
+    if getattr(args, "repair_template", None):
+        src = Path(args.repair_template)
+        # --output-name defaults to the Ndizi slim filename; keep the source
+        # name unless the user explicitly passed a different one.
+        out_name = src.name
+        if args.output_name and args.output_name != DEFAULT_OUTPUT_NAME:
+            out_name = args.output_name
+        repair_bundle_template(src, work_dir, output_name=out_name)
+        return
 
     # ── Optional merge step ───────────────────────────────────────────────────
     if getattr(args, "merge", False):
@@ -1004,6 +1122,7 @@ def run_build(args) -> None:
         quantization=args.quantization,
         cache_length=getattr(args, "cache_length", 1024),
         prefill_lengths=getattr(args, "prefill_lengths", "[64]"),
+        jinja_template_override=getattr(args, "jinja_template_override", JINJA_CHAT_TEMPLATE_OVERRIDE),
     )
 
     if args.upload:

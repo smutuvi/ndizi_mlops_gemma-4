@@ -35,7 +35,7 @@ def _run(cmd: list[str], *, cwd: Path | None = None) -> str:
     proc = subprocess.run(
         cmd,
         cwd=str(cwd) if cwd else None,
-        check=True,
+        check=False,  # check manually after printing output
         text=True,
         capture_output=True,
     )
@@ -43,6 +43,8 @@ def _run(cmd: list[str], *, cwd: Path | None = None) -> str:
         print(proc.stdout, end="", flush=True)
     if proc.stderr:
         print(proc.stderr, end="", file=sys.stderr, flush=True)
+    if proc.returncode != 0:
+        raise subprocess.CalledProcessError(proc.returncode, proc.args)
     return proc.stdout or ""
 
 

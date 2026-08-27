@@ -93,9 +93,13 @@ def _save_audio_tmp(audio: dict) -> Path:
 
 # ── Chat test ─────────────────────────────────────────────────────────────────
 
-def test_chat(model: str, prompts: list[str]) -> bool:
+DEFAULT_SYSTEM_PROMPT = "Wewe ni msaidizi wa lugha ya Kiswahili."
+
+
+def test_chat(model: str, prompts: list[str], system_prompt: str = DEFAULT_SYSTEM_PROMPT) -> bool:
     print(f"\n{'═'*60}")
     print("CHAT TEST")
+    print(f"  System prompt: {system_prompt}")
     print(f"{'═'*60}")
     try:
         import litert_lm
@@ -105,7 +109,7 @@ def test_chat(model: str, prompts: list[str]) -> bool:
         with litert_lm.Engine(model, backend=litert_lm.Backend.CPU()) as engine:
             with engine.create_conversation(messages=[
                 {"role": "system", "content": [{"type": "text",
-                 "text": "Wewe ni msaidizi wa lugha ya Kiswahili."}]}
+                 "text": system_prompt}]}
             ]) as conv:
                 for i, prompt in enumerate(prompts, 1):
                     print(f"\n  [{i}] User : {prompt}")
@@ -236,6 +240,8 @@ def main() -> int:
                     help="ASR samples per dataset (default: 3)")
     ap.add_argument("--chat-prompts", nargs="+", default=None,
                     help="Custom chat prompts (default: 3 built-in Swahili prompts)")
+    ap.add_argument("--system-prompt", default=None,
+                    help=f"System prompt for chat test (default: \"{DEFAULT_SYSTEM_PROMPT}\")")
     ap.add_argument("--no-chat", action="store_true", help="Skip chat test")
     ap.add_argument("--no-asr",  action="store_true", help="Skip ASR test")
     args = ap.parse_args()
@@ -253,8 +259,10 @@ def main() -> int:
     asr_ok  = True
     prompts = args.chat_prompts or CHAT_PROMPTS
 
+    system_prompt = args.system_prompt or DEFAULT_SYSTEM_PROMPT
+
     if not args.no_chat:
-        chat_ok = test_chat(model, prompts)
+        chat_ok = test_chat(model, prompts, system_prompt=system_prompt)
 
     if not args.no_asr:
         if args.audio:

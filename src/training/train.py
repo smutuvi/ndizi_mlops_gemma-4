@@ -92,7 +92,10 @@ def run_train(cli_args) -> None:
         p_dom = 1.0 - p_ret
         print(f"[train] replay mix enabled: retention_ratio={p_ret:.3f} (domain={p_dom:.3f})")
         train_ds = interleave_datasets(
-            [train_ds, retention_train], probabilities=[p_dom, p_ret], seed=42
+            [train_ds, retention_train],
+            probabilities=[p_dom, p_ret],
+            seed=42,
+            stopping_strategy="all_exhausted",
         )
 
     chat_jsonl = getattr(cli_args, "chat_jsonl", None)
@@ -136,16 +139,30 @@ def run_train(cli_args) -> None:
                 row[AUDIO_COLUMN] = dummy_audio
             chat_rows.append(row)
         chat_ds = HfDataset.from_list(chat_rows).cast(train_ds.features)
+        n_asr = len(train_ds)
         p_chat = min(max(chat_ratio, 0.0), 0.5)
         p_asr = 1.0 - p_chat
-        print(f"[train] chat mix enabled: chat_ratio={p_chat:.3f} (asr={p_asr:.3f}, n_chat={len(chat_ds)})")
-        train_ds = interleave_datasets([train_ds, chat_ds], probabilities=[p_asr, p_chat], seed=42)
+        print(
+            f"[train] chat mix enabled: chat_ratio={p_chat:.3f} (asr={p_asr:.3f}, "
+            f"n_asr={n_asr}, n_chat={len(chat_ds)}; cycling chat until ASR is exhausted)"
+        )
+        train_ds = interleave_datasets(
+            [train_ds, chat_ds],
+            probabilities=[p_asr, p_chat],
+            seed=42,
+            stopping_strategy="all_exhausted",
+        )
 
     training_mode = getattr(cli_args, "training_mode", "asr_max")
     use_short_instruction = getattr(cli_args, "short_instruction", False)
     asr_instruction = SHORT_ASR_INSTRUCTION if use_short_instruction else ASR_INSTRUCTION
     print(f"[train] Training mode : {training_mode}")
     print(f"[train] ASR instruction: {'short' if use_short_instruction else 'full'}")
+    n_train = len(train_ds)
+    grad_accum = int(getattr(cli_args, "grad_accum", 16))
+    epochs = float(getattr(cli_args, "epochs", 2.0))
+    steps_est = max(1, int((n_train / max(grad_accum, 1)) * epochs))
+    print(f"[train] Train rows: {n_train:,}  (~{steps_est} optimizer steps at batch=1, accum={grad_accum}, epochs={epochs:g})")
 
     processor = AutoProcessor.from_pretrained(rt.base_model_id, padding_side="left")
 

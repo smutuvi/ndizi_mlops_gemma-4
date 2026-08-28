@@ -171,8 +171,8 @@ def run_train(cli_args) -> None:
         patch_clippable_linear_for_peft()
 
     if training_mode == "asr_safe":
-        # Projector-only: no quantization, no LoRA — only audio_projector + multi_modal_projector trained.
-        print("[train] asr_safe: loading bf16 model, freezing LM decoder, training projectors only")
+        # Projector-only: no quantization, no LoRA — only embed_audio (Gemma 4 audio mapper).
+        print("[train] asr_safe: loading bf16 model, freezing LM decoder, training embed_audio only")
         model = AutoModelForMultimodalLM.from_pretrained(
             rt.base_model_id,
             dtype=torch.bfloat16,

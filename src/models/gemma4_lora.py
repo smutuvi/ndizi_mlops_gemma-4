@@ -432,7 +432,7 @@ def build_gemma4_lora_config(
             )
             target_modules = DEFAULT_GEMMA4_LM_LORA_TARGETS
     if modules_to_save is None:
-        modules_to_save = ["audio_projector", "multi_modal_projector"]
+        modules_to_save = list(PROJECTOR_MODULE_KEYS)
     return LoraConfig(
         r=int(r),
         lora_alpha=int(lora_alpha),
@@ -558,7 +558,9 @@ def patch_clippable_linear_for_peft() -> None:
 
 # ── asr_safe: projector-only training (no LM LoRA) ────────────────────────────
 
-PROJECTOR_MODULE_KEYS = ("audio_projector", "multi_modal_projector")
+# Gemma 4 projects audio with Gemma4MultimodalEmbedder (`embed_audio`), not
+# LLaVA-style `audio_projector` / `multi_modal_projector` (those names are absent).
+PROJECTOR_MODULE_KEYS = ("embed_audio", "audio_projector", "multi_modal_projector")
 
 
 def freeze_lm_decoder(model: Any) -> Any:
@@ -574,9 +576,19 @@ def freeze_lm_decoder(model: Any) -> Any:
             param.requires_grad_(False)
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
+    if trainable == 0:
+        sample = [n for n, _ in list(model.named_parameters())[:12]]
+        raise RuntimeError(
+            "asr_safe: no parameters matched projector keys "
+            f"{PROJECTOR_MODULE_KEYS}. Trainable=0; sample names: {sample}"
+        )
     logger.info(
         "[asr_safe] Trainable params: %s / %s (%.2f%%) — projectors only",
         f"{trainable:,}", f"{total:,}", 100.0 * trainable / total,
+    )
+    print(
+        f"[asr_safe] Trainable params: {trainable:,} / {total:,} "
+        f"({100.0 * trainable / total:.4f}%) — {[k for k in PROJECTOR_MODULE_KEYS]}"
     )
     return model
 
@@ -590,6 +602,11 @@ def save_projector_checkpoint(model: Any, out_dir: Path | str) -> None:
         for k, v in model.state_dict().items()
         if any(key in k for key in PROJECTOR_MODULE_KEYS)
     }
+    if not state:
+        raise RuntimeError(
+            f"No projector tensors to save (looked for {PROJECTOR_MODULE_KEYS} in state_dict). "
+            "Gemma 4 audio mapping lives in embed_audio."
+        )
     save_file(state, out_dir / "projector_weights.safetensors")
     (out_dir / "training_mode.json").write_text(
         json.dumps({"training_mode": "asr_safe", "saved_modules": list(PROJECTOR_MODULE_KEYS)}),
@@ -605,13 +622,37 @@ def is_projector_only_checkpoint(adapter_dir: Path | str) -> bool:
 def load_projector_checkpoint(model: Any, adapter_dir: Path | str) -> Any:
     """Overlay projector weights from an asr_safe checkpoint onto a base model."""
     state = load_file(str(Path(adapter_dir) / "projector_weights.safetensors"))
-    missing, unexpected = model.load_state_dict(state, strict=False)
+    model_keys = set(model.state_dict().keys())
+    remapped = {}
+    for key, tensor in state.items():
+        if key in model_keys:
+            remapped[key] = tensor
+            continue
+        stripped = key
+        for prefix in ("module.", "base_model.", "model.model."):
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix):]
+        if stripped in model_keys:
+            remapped[stripped] = tensor
+        elif f"model.{stripped}" in model_keys:
+            remapped[f"model.{stripped}"] = tensor
+    if not remapped:
+        raise RuntimeError(
+            f"Projector checkpoint had {len(state)} tensors but none matched the model. "
+            f"Examples: {list(state)[:5]} vs model e.g. "
+            f"{[k for k in model_keys if 'embed_audio' in k or 'projector' in k][:8]}"
+        )
+    missing, unexpected = model.load_state_dict(remapped, strict=False)
+    proj_missing = [k for k in missing if any(p in k for p in PROJECTOR_MODULE_KEYS)]
     if unexpected:
         logger.warning("Unexpected keys in projector checkpoint: %s", unexpected[:5])
+    if proj_missing:
+        logger.warning("Projector keys still at base init after load: %s", proj_missing[:8])
     logger.info(
-        "Loaded projector weights (%d tensors); %d keys not in checkpoint",
-        len(state), len(missing),
+        "Loaded projector weights (%d tensors applied / %d in file); %d other keys unchanged",
+        len(remapped), len(state), len(missing),
     )
+    print(f"[eval] Applied {len(remapped)} projector tensors from {adapter_dir}")
     return model
 
 

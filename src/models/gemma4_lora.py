@@ -431,15 +431,17 @@ def build_gemma4_lora_config(
                 "pass model= for KV-shared-safe targets"
             )
             target_modules = DEFAULT_GEMMA4_LM_LORA_TARGETS
+    # Never default-wrap embed_audio: Gemma 4 calls it as embed_audio(inputs_embeds=...)
+    # and PEFT AuxiliaryTrainingWrapper.forward(x) raises TypeError.
     if modules_to_save is None:
-        modules_to_save = list(PROJECTOR_MODULE_KEYS)
+        modules_to_save = []
     return LoraConfig(
         r=int(r),
         lora_alpha=int(lora_alpha),
         lora_dropout=float(lora_dropout),
         bias="none",
         target_modules=target_modules,
-        modules_to_save=list(modules_to_save),
+        modules_to_save=list(modules_to_save) if modules_to_save else None,
         task_type="CAUSAL_LM",
     )
 
@@ -504,7 +506,7 @@ def apply_gemma4_lora(model: Any, lora_config: LoraConfig, *, debug_targets: boo
     if debug_targets:
         logger.info("LoRA will attach to %d modules", n)
     try:
-        return get_peft_model(model, lora_config)
+        model = get_peft_model(model, lora_config)
     except ValueError as e:
         if "Gemma4ClippableLinear" not in str(e):
             raise
@@ -513,6 +515,10 @@ def apply_gemma4_lora(model: Any, lora_config: LoraConfig, *, debug_targets: boo
             "scripts/train_gemma4.py --no-4bit for bf16 LoRA. "
             f"Original error: {e}"
         ) from e
+    n_audio = unfreeze_audio_mapper(model)
+    if n_audio:
+        print(f"[train] Unfroze {n_audio} embed_audio tensors (not PEFT modules_to_save)")
+    return model
 
 
 def patch_clippable_linear_for_peft() -> None:
@@ -560,15 +566,25 @@ def patch_clippable_linear_for_peft() -> None:
 
 # Gemma 4 projects audio with Gemma4MultimodalEmbedder (`embed_audio`), not
 # LLaVA-style `audio_projector` / `multi_modal_projector` (those names are absent).
+#
+# Do not put embed_audio in PEFT modules_to_save. The parent forward is
+#   self.embed_audio(inputs_embeds=audio_outputs.last_hidden_state)
+# and PEFT's AuxiliaryTrainingWrapper requires a positional `x` (peft#3191).
 PROJECTOR_MODULE_KEYS = ("embed_audio", "audio_projector", "multi_modal_projector")
 
 
-def freeze_lm_decoder(model: Any) -> Any:
-    """Freeze all parameters except audio_projector and multi_modal_projector.
+def unfreeze_audio_mapper(model: Any) -> int:
+    """Mark embed_audio (and legacy projector) params trainable after PEFT freeze."""
+    n = 0
+    for name, param in model.named_parameters():
+        if any(k in name for k in PROJECTOR_MODULE_KEYS):
+            param.requires_grad_(True)
+            n += 1
+    return n
 
-    Used for asr_safe training mode — only the multimodal projection layers are
-    updated, leaving the LM decoder weights completely unchanged.
-    """
+
+def freeze_lm_decoder(model: Any) -> Any:
+    """Freeze all parameters except Gemma 4 embed_audio (asr_safe projector-only)."""
     for name, param in model.named_parameters():
         if any(k in name for k in PROJECTOR_MODULE_KEYS):
             param.requires_grad_(True)
@@ -593,8 +609,8 @@ def freeze_lm_decoder(model: Any) -> Any:
     return model
 
 
-def save_projector_checkpoint(model: Any, out_dir: Path | str) -> None:
-    """Save only projector weights + a mode marker. Compatible with load_projector_checkpoint."""
+def save_projector_checkpoint(model: Any, out_dir: Path | str, *, training_mode: str = "asr_safe") -> None:
+    """Save embed_audio weights next to a LoRA adapter or as an asr_safe-only checkpoint."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
     state = {
@@ -609,33 +625,55 @@ def save_projector_checkpoint(model: Any, out_dir: Path | str) -> None:
         )
     save_file(state, out_dir / "projector_weights.safetensors")
     (out_dir / "training_mode.json").write_text(
-        json.dumps({"training_mode": "asr_safe", "saved_modules": list(PROJECTOR_MODULE_KEYS)}),
+        json.dumps({"training_mode": training_mode, "saved_modules": list(PROJECTOR_MODULE_KEYS)}),
         encoding="utf-8",
     )
-    logger.info("Saved projector-only checkpoint (%d tensors) to %s", len(state), out_dir)
+    logger.info("Saved projector checkpoint (%d tensors, mode=%s) to %s", len(state), training_mode, out_dir)
+
+
+def has_projector_weights(adapter_dir: Path | str) -> bool:
+    return (Path(adapter_dir) / "projector_weights.safetensors").is_file()
 
 
 def is_projector_only_checkpoint(adapter_dir: Path | str) -> bool:
-    return (Path(adapter_dir) / "training_mode.json").exists()
+    """True when embed_audio was saved without a PEFT adapter_config.json."""
+    d = Path(adapter_dir)
+    return has_projector_weights(d) and not (d / "adapter_config.json").is_file()
+
+
+def _match_state_key(key: str, model_keys: set[str]) -> str | None:
+    if key in model_keys:
+        return key
+    prefixes = ("module.", "base_model.model.", "base_model.", "model.model.", "model.")
+    variants = [key]
+    stripped = key
+    changed = True
+    while changed:
+        changed = False
+        for prefix in prefixes:
+            if stripped.startswith(prefix):
+                stripped = stripped[len(prefix):]
+                variants.append(stripped)
+                changed = True
+                break
+    for v in variants:
+        if v in model_keys:
+            return v
+        for wrapped in (f"model.{v}", f"base_model.model.{v}", f"base_model.{v}"):
+            if wrapped in model_keys:
+                return wrapped
+    return None
 
 
 def load_projector_checkpoint(model: Any, adapter_dir: Path | str) -> Any:
-    """Overlay projector weights from an asr_safe checkpoint onto a base model."""
+    """Overlay embed_audio weights onto a base or PeftModel."""
     state = load_file(str(Path(adapter_dir) / "projector_weights.safetensors"))
     model_keys = set(model.state_dict().keys())
     remapped = {}
     for key, tensor in state.items():
-        if key in model_keys:
-            remapped[key] = tensor
-            continue
-        stripped = key
-        for prefix in ("module.", "base_model.", "model.model."):
-            if stripped.startswith(prefix):
-                stripped = stripped[len(prefix):]
-        if stripped in model_keys:
-            remapped[stripped] = tensor
-        elif f"model.{stripped}" in model_keys:
-            remapped[f"model.{stripped}"] = tensor
+        matched = _match_state_key(key, model_keys)
+        if matched is not None:
+            remapped[matched] = tensor
     if not remapped:
         raise RuntimeError(
             f"Projector checkpoint had {len(state)} tensors but none matched the model. "
@@ -653,6 +691,17 @@ def load_projector_checkpoint(model: Any, adapter_dir: Path | str) -> Any:
         len(remapped), len(state), len(missing),
     )
     print(f"[eval] Applied {len(remapped)} projector tensors from {adapter_dir}")
+    return model
+
+
+def load_ndizi_checkpoint(base: Any, adapter_dir: Path | str) -> Any:
+    """Load asr_safe projector weights and/or a LoRA adapter onto `base`."""
+    adapter_dir = Path(adapter_dir)
+    if is_projector_only_checkpoint(adapter_dir):
+        return load_projector_checkpoint(base, adapter_dir)
+    model = load_gemma4_peft_adapter(base, adapter_dir)
+    if has_projector_weights(adapter_dir):
+        model = load_projector_checkpoint(model, adapter_dir)
     return model
 
 
@@ -683,7 +732,7 @@ def build_asr_moderate_lora_config(
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
 ) -> LoraConfig:
-    """LoRA on the last num_tail_layers decoder layers only, plus full projector saves."""
+    """LoRA on the last num_tail_layers decoder layers; embed_audio is unfrozen separately."""
     total = _count_decoder_layers(model)
     first_tail = max(0, total - num_tail_layers)
     tail_indices = "|".join(str(i) for i in range(first_tail, total))
@@ -698,6 +747,5 @@ def build_asr_moderate_lora_config(
         lora_dropout=lora_dropout,
         bias="none",
         target_modules=target_regex,
-        modules_to_save=list(PROJECTOR_MODULE_KEYS),
         task_type="CAUSAL_LM",
     )

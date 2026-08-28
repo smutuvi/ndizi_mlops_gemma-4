@@ -339,7 +339,7 @@ def run_train(cli_args) -> None:
 
     if training_mode == "asr_safe":
         # Save only the projector weights — avoids writing a 5GB full model checkpoint.
-        save_projector_checkpoint(trainer.model, out_dir)
+        save_projector_checkpoint(trainer.model, out_dir, training_mode="asr_safe")
         processor.save_pretrained(str(out_dir))
         print(f"[asr_safe] Saved projector-only checkpoint to {out_dir}")
     else:
@@ -347,4 +347,6 @@ def run_train(cli_args) -> None:
         processor.save_pretrained(str(out_dir))
         if rewrite_adapter_config_for_kv_shared(out_dir, trainer.model):
             print("[train] Patched adapter_config.json for Gemma 4 KV-shared layers")
-        print("Saved LoRA adapter to", out_dir)
+        # embed_audio is not PEFT modules_to_save (kwargs-only forward). Persist it beside LoRA.
+        save_projector_checkpoint(trainer.model, out_dir, training_mode=training_mode)
+        print("Saved LoRA adapter + embed_audio to", out_dir)

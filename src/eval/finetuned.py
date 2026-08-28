@@ -8,11 +8,7 @@ import torch
 from datasets import load_from_disk
 from transformers import AutoModelForMultimodalLM, AutoProcessor
 
-from src.models.gemma4_lora import (
-    is_projector_only_checkpoint,
-    load_gemma4_peft_adapter,
-    load_projector_checkpoint,
-)
+from src.models.gemma4_lora import load_ndizi_checkpoint
 
 from src.eval.eval_outputs import (
     build_prediction_rows,
@@ -59,10 +55,7 @@ def load_finetuned_gemma(checkpoint_dir: Path | str | None = None, *, fp16: bool
         device_map="auto",
         attn_implementation="sdpa",
     )
-    if is_projector_only_checkpoint(adapter):
-        model = load_projector_checkpoint(base, adapter).eval()
-    else:
-        model = load_gemma4_peft_adapter(base, adapter).eval()
+    model = load_ndizi_checkpoint(base, adapter).eval()
     return model, processor, adapter
 
 

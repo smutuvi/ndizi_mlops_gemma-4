@@ -14,8 +14,7 @@ from transformers import AutoModelForMultimodalLM, AutoProcessor
 
 from src.models.gemma4_lora import (
     is_projector_only_checkpoint,
-    load_gemma4_peft_adapter,
-    load_projector_checkpoint,
+    load_ndizi_checkpoint,
     rewrite_adapter_config_for_kv_shared,
 )
 from src.utils.constants import SRC_DATASETS
@@ -235,11 +234,11 @@ def run_publish(args) -> None:
         base = AutoModelForMultimodalLM.from_pretrained(
             rt.base_model_id, dtype=torch.bfloat16, device_map="cpu"
         )
+        merged = load_ndizi_checkpoint(base, adapter_dir)
         if is_projector_only_checkpoint(adapter_dir):
-            print("[publish] asr_safe checkpoint detected — loading projector weights onto base model")
-            merged = load_projector_checkpoint(base, adapter_dir)
+            print("[publish] asr_safe checkpoint detected — projector weights on base model")
         else:
-            merged = load_gemma4_peft_adapter(base, str(adapter_dir))
+            print("[publish] merging LoRA adapter (embed_audio already overlaid if present)")
             merged = merged.merge_and_unload()
         merged.save_pretrained(str(MERGED_LOCAL), safe_serialization=True)
         processor.save_pretrained(str(MERGED_LOCAL))

@@ -48,6 +48,9 @@ def _tag(ds: Dataset, spec: dict[str, Any]) -> Dataset:
     lang = spec["lang"]
     prompt = LANG_ASR_PROMPTS[lang]
     src = _source_label(spec)
+    overlap = [c for c in ("source_dataset", "task", "language", "asr_instruction") if c in ds.column_names]
+    if overlap:
+        ds = ds.remove_columns(overlap)
     n = len(ds)
     ds = ds.add_column("source_dataset", [src] * n)
     ds = ds.add_column("task", ["asr"] * n)

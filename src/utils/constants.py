@@ -17,6 +17,30 @@ SUNFLOWER_EVAL_ASR = [
     "smutuvi/ndizi-1-2025:test",
     "google/fleurs:sw_ke:test",
 ]
+AFRICAN_EVAL_ASR = [
+    "smutuvi/ndizi-1:test",
+    "smutuvi/ndizi-1-2025:test",
+    "google/fleurs:sw_ke:test",
+    "google/WaxalNLP:amh_asr:test",
+    "google/WaxalNLP:orm_asr:test",
+]
+
+# Multilingual on-device mix: Ndizi + other Swahili + WaxalNLP Amharic/Oromo.
+# Test splits are never used for training. Waxal train is capped unless --full-waxal.
+AFRICAN_ASR_SOURCES = (
+    {"id": "smutuvi/ndizi-1", "config": None, "lang": "sw", "max_train": None},
+    {"id": "smutuvi/ndizi-1-2025", "config": None, "lang": "sw", "max_train": None},
+    {"id": "google/fleurs", "config": "sw_ke", "lang": "sw", "max_train": None},
+    {"id": "nickdee96/ALFFA-Swahili-News", "config": None, "lang": "sw", "max_train": None},
+    {"id": "Sunbird/salt", "config": "studio-swa", "lang": "sw", "max_train": 20_000},
+    {"id": "google/WaxalNLP", "config": "amh_asr", "lang": "am", "max_train": 20_000},
+    {"id": "google/WaxalNLP", "config": "orm_asr", "lang": "om", "max_train": 20_000},
+)
+LANG_ASR_PROMPTS = {
+    "sw": "Andika maneno unayosikia katika sauti hii.",
+    "am": "ይህን ንግግር በአማርኛ ጻፍ። ውጤቱ ጽሑፍ ብቻ ይሁን።",
+    "om": "Dubbii kana Afaan Oromootiin barreessi. Barreeffama qofa baasi.",
+}
 AUDIO_COLUMN = "audio"
 TEXT_COLUMN = "text"
 SPEAKER_COLUMN = "speaker_id"

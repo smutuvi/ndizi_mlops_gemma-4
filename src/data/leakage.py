@@ -86,6 +86,21 @@ def parse_asr_repo(raw: str) -> tuple[str, str | None]:
     return raw, None
 
 
+def load_asr_hub_split(repo_id: str, split: str, *, config: str | None = None):
+    """Load one Hub split and rename audio/text columns to the project contract."""
+    from datasets import Audio
+
+    from src.utils.constants import AUDIO_COLUMN, TARGET_SR, TEXT_COLUMN
+
+    ds = load_dataset(repo_id, config, split=split) if config else load_dataset(repo_id, split=split)
+    a_col, t_col = resolve_columns(list(ds.column_names))
+    if a_col != AUDIO_COLUMN:
+        ds = ds.rename_column(a_col, AUDIO_COLUMN)
+    if t_col != TEXT_COLUMN:
+        ds = ds.rename_column(t_col, TEXT_COLUMN)
+    return ds.cast_column(AUDIO_COLUMN, Audio(sampling_rate=TARGET_SR))
+
+
 def load_asr_hub_dataset(repo_id: str, *, config: str | None = None):
     """Load a Hub ASR dataset and rename audio/text columns to the project contract."""
     from datasets import Audio, DatasetDict

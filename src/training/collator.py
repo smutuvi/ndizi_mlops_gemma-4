@@ -24,10 +24,11 @@ class GemmaASRCollator:
         ex = batch[0]
         target = ex[TEXT_COLUMN]
         wave = prepare_audio_for_gemma(ex[AUDIO_COLUMN])
+        instr = str(ex.get("asr_instruction") or self.instruction)
         inputs = gemma_build_inputs(
             self.proc,
             wave,
-            self.instruction,
+            instr,
             add_generation_prompt=False,
             assistant_text=target,
         )
@@ -54,7 +55,9 @@ class GemmaMixedCollator:
         ex = batch[0]
         if str(ex.get("task") or "asr") == "chat":
             return self._chat(ex)
-        return GemmaASRCollator(self.proc, instruction=self.instruction)(batch)
+        return GemmaASRCollator(
+            self.proc, instruction=str(ex.get("asr_instruction") or self.instruction)
+        )(batch)
 
     def _chat(self, ex: dict[str, Any]):
         user = ex.get("prompt") or ex.get("instruction") or ""

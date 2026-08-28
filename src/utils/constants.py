@@ -25,8 +25,10 @@ WHISPER_REF_ID = "openai/whisper-large-v3"
 TARGET_SR = 16_000
 MAX_AUDIO_SEC = 30.0
 
-# Short variant for asr_safe / asr_moderate training examples.
-# Reduces instruction-following contamination of the LM decoder.
+# Must match LiteRT / on-device ASR (conversion_scripts/quick_test.py, .litertlm bundles).
+ONDEVICE_ASR_INSTRUCTION = "Andika maneno unayosikia katika sauti hii."
+
+# Short English variant (training only; do not use for LiteRT eval).
 SHORT_ASR_INSTRUCTION = (
     "Transcribe the Swahili audio exactly as spoken. "
     "Output only the transcript text, no explanations."
@@ -59,3 +61,17 @@ PUNCTUATION_ASR_INSTRUCTION = (
     "* When transcribing numbers, write the digits, i.e. write 1.7 and not "
     "one point seven, and write 3 instead of three."
 )
+
+ASR_PROMPT_MAP = {
+    "ondevice": ONDEVICE_ASR_INSTRUCTION,
+    "short": SHORT_ASR_INSTRUCTION,
+    "full": ASR_INSTRUCTION,
+    "punctuation": PUNCTUATION_ASR_INSTRUCTION,
+}
+
+
+def resolve_asr_prompt(style: str | None) -> str:
+    key = (style or "ondevice").strip().lower()
+    if key not in ASR_PROMPT_MAP:
+        raise ValueError(f"Unknown ASR prompt style {style!r}; expected one of {sorted(ASR_PROMPT_MAP)}")
+    return ASR_PROMPT_MAP[key]

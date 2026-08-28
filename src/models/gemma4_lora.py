@@ -482,7 +482,14 @@ def infer_lm_lora_regex_from_model(model: Any) -> str:
     raise RuntimeError("Could not infer language-model LoRA targets from model.named_modules()")
 
 
-def apply_gemma4_lora(model: Any, lora_config: LoraConfig, *, debug_targets: bool = False) -> Any:
+def apply_gemma4_lora(
+    model: Any,
+    lora_config: LoraConfig,
+    *,
+    debug_targets: bool = False,
+    include_audio_tower: bool = False,
+    audio_tower_last_layers: int = 4,
+) -> Any:
     targets = lora_config.target_modules
     n = count_lora_target_modules(model, targets)
     if n == 0 and isinstance(targets, str):
@@ -515,9 +522,17 @@ def apply_gemma4_lora(model: Any, lora_config: LoraConfig, *, debug_targets: boo
             "scripts/train_gemma4.py --no-4bit for bf16 LoRA. "
             f"Original error: {e}"
         ) from e
-    n_audio = unfreeze_audio_mapper(model)
+    n_audio = unfreeze_audio_mapper(
+        model,
+        include_audio_tower=include_audio_tower,
+        audio_tower_last_layers=audio_tower_last_layers,
+    )
     if n_audio:
-        print(f"[train] Unfroze {n_audio} embed_audio tensors (not PEFT modules_to_save)")
+        print(
+            f"[train] Unfroze {n_audio} audio tensors "
+            f"(embed_audio"
+            f"{'+ audio_tower' if include_audio_tower else ''}; not PEFT modules_to_save)"
+        )
     return model
 
 
@@ -571,40 +586,84 @@ def patch_clippable_linear_for_peft() -> None:
 #   self.embed_audio(inputs_embeds=audio_outputs.last_hidden_state)
 # and PEFT's AuxiliaryTrainingWrapper requires a positional `x` (peft#3191).
 PROJECTOR_MODULE_KEYS = ("embed_audio", "audio_projector", "multi_modal_projector")
+_AUDIO_LAYER_RE = re.compile(r"audio_tower.*(?:layers|layer|blocks|block)\.(\d+)")
 
 
-def unfreeze_audio_mapper(model: Any) -> int:
-    """Mark embed_audio (and legacy projector) params trainable after PEFT freeze."""
+def _audio_tower_layer_index(name: str) -> int | None:
+    m = _AUDIO_LAYER_RE.search(name)
+    return int(m.group(1)) if m else None
+
+
+def unfreeze_audio_mapper(
+    model: Any,
+    *,
+    include_audio_tower: bool = False,
+    audio_tower_last_layers: int = 4,
+) -> int:
+    """Mark embed_audio (and optionally last audio_tower layers) trainable after PEFT freeze."""
+    max_audio = -1
+    if include_audio_tower:
+        for name, _ in model.named_parameters():
+            idx = _audio_tower_layer_index(name)
+            if idx is not None:
+                max_audio = max(max_audio, idx)
+    first_unfreeze = 0
+    if include_audio_tower and audio_tower_last_layers > 0 and max_audio >= 0:
+        first_unfreeze = max(0, max_audio - audio_tower_last_layers + 1)
+        print(
+            f"[train] audio_tower: unfreezing layers {first_unfreeze}–{max_audio} "
+            f"(of 0–{max_audio})"
+        )
+    elif include_audio_tower:
+        print("[train] audio_tower: unfreezing all audio_tower parameters")
+
     n = 0
     for name, param in model.named_parameters():
         if any(k in name for k in PROJECTOR_MODULE_KEYS):
             param.requires_grad_(True)
             n += 1
+            continue
+        if not include_audio_tower or "audio_tower" not in name or "vision_tower" in name:
+            continue
+        idx = _audio_tower_layer_index(name)
+        if audio_tower_last_layers <= 0 or max_audio < 0:
+            param.requires_grad_(True)
+            n += 1
+        elif idx is not None and idx >= first_unfreeze:
+            param.requires_grad_(True)
+            n += 1
     return n
 
 
-def freeze_lm_decoder(model: Any) -> Any:
-    """Freeze all parameters except Gemma 4 embed_audio (asr_safe projector-only)."""
-    for name, param in model.named_parameters():
-        if any(k in name for k in PROJECTOR_MODULE_KEYS):
-            param.requires_grad_(True)
-        else:
-            param.requires_grad_(False)
+def freeze_lm_decoder(
+    model: Any,
+    *,
+    include_audio_tower: bool = False,
+    audio_tower_last_layers: int = 4,
+) -> Any:
+    """Freeze the LM; train embed_audio and optionally last audio_tower layers (asr_safe)."""
+    for param in model.parameters():
+        param.requires_grad_(False)
+    trainable_tensors = unfreeze_audio_mapper(
+        model,
+        include_audio_tower=include_audio_tower,
+        audio_tower_last_layers=audio_tower_last_layers,
+    )
     trainable = sum(p.numel() for p in model.parameters() if p.requires_grad)
     total = sum(p.numel() for p in model.parameters())
-    if trainable == 0:
+    if trainable == 0 or trainable_tensors == 0:
         sample = [n for n, _ in list(model.named_parameters())[:12]]
         raise RuntimeError(
-            "asr_safe: no parameters matched projector keys "
+            "asr_safe: no parameters matched audio mapper keys "
             f"{PROJECTOR_MODULE_KEYS}. Trainable=0; sample names: {sample}"
         )
     logger.info(
-        "[asr_safe] Trainable params: %s / %s (%.2f%%) — projectors only",
+        "[asr_safe] Trainable params: %s / %s (%.2f%%) — audio path",
         f"{trainable:,}", f"{total:,}", 100.0 * trainable / total,
     )
     print(
         f"[asr_safe] Trainable params: {trainable:,} / {total:,} "
-        f"({100.0 * trainable / total:.4f}%) — {[k for k in PROJECTOR_MODULE_KEYS]}"
+        f"({100.0 * trainable / total:.4f}%)"
     )
     return model
 
@@ -613,11 +672,15 @@ def save_projector_checkpoint(model: Any, out_dir: Path | str, *, training_mode:
     """Save embed_audio weights next to a LoRA adapter or as an asr_safe-only checkpoint."""
     out_dir = Path(out_dir)
     out_dir.mkdir(parents=True, exist_ok=True)
-    state = {
-        k: v.cpu().contiguous()
-        for k, v in model.state_dict().items()
-        if any(key in k for key in PROJECTOR_MODULE_KEYS)
-    }
+    trainable_audio_tower = any(
+        "audio_tower" in n and p.requires_grad for n, p in model.named_parameters()
+    )
+    state = {}
+    for k, v in model.state_dict().items():
+        if any(key in k for key in PROJECTOR_MODULE_KEYS):
+            state[k] = v.cpu().contiguous()
+        elif trainable_audio_tower and "audio_tower" in k:
+            state[k] = v.cpu().contiguous()
     if not state:
         raise RuntimeError(
             f"No projector tensors to save (looked for {PROJECTOR_MODULE_KEYS} in state_dict). "
@@ -732,8 +795,17 @@ def build_asr_moderate_lora_config(
     lora_alpha: int = 16,
     lora_dropout: float = 0.05,
 ) -> LoraConfig:
-    """LoRA on the last num_tail_layers decoder layers; embed_audio is unfrozen separately."""
+    """LoRA on the last decoder layers; always includes the last unique-KV layer on Gemma 4 E2B."""
     total = _count_decoder_layers(model)
+    last_kv = _last_layer_with_kv_proj(model)
+    if last_kv is not None:
+        min_tail = total - last_kv  # include layer last_kv (has k_proj/v_proj)
+        if num_tail_layers < min_tail:
+            print(
+                f"[asr_moderate] Raising --tail-lora-layers {num_tail_layers} → {min_tail} "
+                f"so LoRA includes unique-KV layer {last_kv} (layers {last_kv + 1}–{total - 1} are KV-shared)"
+            )
+            num_tail_layers = min_tail
     first_tail = max(0, total - num_tail_layers)
     tail_indices = "|".join(str(i) for i in range(first_tail, total))
     target_regex = build_kv_aware_lm_lora_regex(model, layer_filter=tail_indices)

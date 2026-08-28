@@ -32,10 +32,9 @@ from src.training.gemma_trainer import GemmaASRTrainer
 from src.training.retention import maybe_load_retention_replay_train
 from src.utils.constants import (
     AUDIO_COLUMN,
-    ASR_INSTRUCTION,
-    SHORT_ASR_INSTRUCTION,
     SUNFLOWER_SYSTEM_PROMPT,
     TARGET_SR,
+    resolve_asr_prompt,
 )
 from src.utils.paths import CHECKPOINT_DIR, PREPARED_LOCAL
 from src.utils.runtime import get_runtime
@@ -100,6 +99,10 @@ def run_train(cli_args) -> None:
 
     chat_jsonl = getattr(cli_args, "chat_jsonl", None)
     chat_ratio = float(getattr(cli_args, "chat_ratio", 0.0) or 0.0)
+    if getattr(cli_args, "training_mode", "asr_max") == "asr_safe" and chat_ratio > 0:
+        print("[train] asr_safe: skipping chat mix (LM is frozen; dummy-audio chat rows would poison audio_tower)")
+        chat_jsonl = None
+        chat_ratio = 0.0
     if chat_jsonl and chat_ratio > 0:
         import numpy as np
         from datasets import Dataset as HfDataset
@@ -154,10 +157,12 @@ def run_train(cli_args) -> None:
         )
 
     training_mode = getattr(cli_args, "training_mode", "asr_max")
-    use_short_instruction = getattr(cli_args, "short_instruction", False)
-    asr_instruction = SHORT_ASR_INSTRUCTION if use_short_instruction else ASR_INSTRUCTION
+    prompt_style = getattr(cli_args, "asr_prompt", None)
+    if not prompt_style:
+        prompt_style = "short" if getattr(cli_args, "short_instruction", False) else "full"
+    asr_instruction = resolve_asr_prompt(prompt_style)
     print(f"[train] Training mode : {training_mode}")
-    print(f"[train] ASR instruction: {'short' if use_short_instruction else 'full'}")
+    print(f"[train] ASR prompt    : {prompt_style} ({asr_instruction[:60]}{'…' if len(asr_instruction) > 60 else ''})")
     n_train = len(train_ds)
     grad_accum = int(getattr(cli_args, "grad_accum", 16))
     epochs = float(getattr(cli_args, "epochs", 2.0))
@@ -171,8 +176,8 @@ def run_train(cli_args) -> None:
         patch_clippable_linear_for_peft()
 
     if training_mode == "asr_safe":
-        # Projector-only: no quantization, no LoRA — only embed_audio (Gemma 4 audio mapper).
-        print("[train] asr_safe: loading bf16 model, freezing LM decoder, training embed_audio only")
+        # Audio-path SFT: no quantization, no LoRA — embed_audio + optional audio_tower.
+        print("[train] asr_safe: loading bf16 model, freezing LM decoder, training audio path")
         model = AutoModelForMultimodalLM.from_pretrained(
             rt.base_model_id,
             dtype=torch.bfloat16,
@@ -182,7 +187,11 @@ def run_train(cli_args) -> None:
         n_kv = repair_kv_shared_dummy_projections(model)
         if n_kv:
             print(f"[train] Repaired {n_kv} dummy KV-shared k/v projections")
-        model = freeze_lm_decoder(model)
+        model = freeze_lm_decoder(
+            model,
+            include_audio_tower=bool(getattr(cli_args, "unfreeze_audio_tower", False)),
+            audio_tower_last_layers=int(getattr(cli_args, "audio_tower_last_layers", 4)),
+        )
         model.train()
     else:
         # asr_moderate or asr_max: 4-bit QLoRA
@@ -231,7 +240,13 @@ def run_train(cli_args) -> None:
             lora_target = getattr(cli_args, "lora_target_modules", None)
             lora = build_gemma4_lora_config(model, target_modules=lora_target)
 
-        model = apply_gemma4_lora(model, lora, debug_targets=bool(getattr(cli_args, "debug_lora_targets", False)))
+        model = apply_gemma4_lora(
+            model,
+            lora,
+            debug_targets=bool(getattr(cli_args, "debug_lora_targets", False)),
+            include_audio_tower=bool(getattr(cli_args, "unfreeze_audio_tower", False)),
+            audio_tower_last_layers=int(getattr(cli_args, "audio_tower_last_layers", 4)),
+        )
         model.print_trainable_parameters()
         if use_4bit:
             n_qs = ensure_linear4bit_quant_state(model)

@@ -274,10 +274,11 @@ def main() -> int:
     from src.eval.finetuned import run_evaluate
     from src.eval.normalize import TEXT_NORMALIZE_EVAL_DEFAULT, add_normalize_arg
     from src.utils.constants import (
-        PUNCTUATION_ASR_INSTRUCTION,
+        ASR_PROMPT_MAP,
         SUNFLOWER_EVAL_ASR,
         SUNFLOWER_MODEL_ID,
         SUNFLOWER_SYSTEM_PROMPT,
+        resolve_asr_prompt,
     )
     from src.utils.paths import SUNFLOWER_CHECKPOINT_DIR
     from src.utils.runtime import apply_model_choice
@@ -311,9 +312,16 @@ def main() -> int:
     p.add_argument("--fp16", action="store_true")
     p.add_argument("--max-new-tokens", type=int, default=256)
     p.add_argument("--chunk_length_s", type=float, default=30.0)
+    p.add_argument(
+        "--asr-prompt",
+        choices=tuple(ASR_PROMPT_MAP),
+        default="ondevice",
+        help="Must match training and LiteRT: ondevice = 'Andika maneno unayosikia katika sauti hii.'",
+    )
     add_normalize_arg(p, default=TEXT_NORMALIZE_EVAL_DEFAULT)
     args = p.parse_args()
-    args.asr_instruction = PUNCTUATION_ASR_INSTRUCTION
+    args.asr_instruction = resolve_asr_prompt(args.asr_prompt)
+    print(f"[eval] ASR prompt: {args.asr_prompt} ({args.asr_instruction})")
     args.no_auto_chunk = False
     args.stride_length_s = None
     args.max_audio_seconds = None

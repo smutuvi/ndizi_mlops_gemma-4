@@ -84,31 +84,58 @@ def main() -> int:
     p.add_argument("--tail-lora-layers", type=int, default=6)
     p.add_argument("--tail-lora-rank", type=int, default=8)
     p.add_argument(
+        "--asr-prompt",
+        choices=("ondevice", "short", "full", "punctuation"),
+        default="ondevice",
+        help="Train with the LiteRT on-device Swahili prompt (default). "
+        "short/full/punctuation are English eval-style prompts.",
+    )
+    p.add_argument(
         "--short-instruction",
-        dest="short_instruction",
-        action="store_true",
-        help="Short ASR instruction (default; better for keeping Sunflower chat).",
+        dest="asr_prompt",
+        action="store_const",
+        const="short",
+        help="Alias for --asr-prompt short.",
     )
     p.add_argument(
         "--full-instruction",
-        dest="short_instruction",
-        action="store_false",
-        help="Use the long ASR instruction instead of short.",
+        dest="asr_prompt",
+        action="store_const",
+        const="full",
+        help="Alias for --asr-prompt full.",
     )
-    p.set_defaults(short_instruction=True)
+    p.add_argument(
+        "--unfreeze-audio-tower",
+        dest="unfreeze_audio_tower",
+        action="store_true",
+        help="Train last audio_tower layers (needed for noisy Ndizi; default on).",
+    )
+    p.add_argument(
+        "--freeze-audio-tower",
+        dest="unfreeze_audio_tower",
+        action="store_false",
+        help="Keep the audio encoder frozen (embed_audio only).",
+    )
+    p.set_defaults(unfreeze_audio_tower=True)
+    p.add_argument(
+        "--audio-tower-last-layers",
+        type=int,
+        default=4,
+        help="How many trailing audio_tower layers to train (0 = all). Default 4.",
+    )
     p.add_argument("--chat-jsonl", default=str(ROOT / "data" / "sunflower_chat_train.jsonl"))
     p.add_argument("--chat-ratio", type=float, default=0.2, help="Mix ratio for text chat rows (0 disables).")
     p.add_argument("--no-chat-mix", action="store_true")
     p.add_argument("--system-prompt", default=SUNFLOWER_SYSTEM_PROMPT)
-    p.add_argument("--lr", type=float, default=1e-4)
+    p.add_argument("--lr", type=float, default=2e-5)
     p.add_argument("--epochs", type=float, default=2.0)
     p.add_argument("--grad-accum", type=int, default=16)
     p.add_argument("--warmup-ratio", type=float, default=0.03)
     p.add_argument("--lr-scheduler", type=str, default="cosine")
-    p.add_argument("--eval-steps", type=int, default=500)
+    p.add_argument("--eval-steps", type=int, default=100)
     p.add_argument("--eval-max-samples", type=int, default=64)
     p.add_argument("--no-train-eval", action="store_true")
-    p.add_argument("--save-steps", type=int, default=500)
+    p.add_argument("--save-steps", type=int, default=100)
     p.add_argument("--save-total-limit", type=int, default=3)
     p.add_argument("--no-4bit", action="store_true")
     p.add_argument("--lora-target-modules", default=None)

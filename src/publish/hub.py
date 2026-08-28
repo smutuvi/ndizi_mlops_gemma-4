@@ -27,6 +27,7 @@ from src.utils.paths import (
     MERGED_LOCAL,
     RETENTION_BASELINE_JSON,
     RETENTION_FINETUNED_JSON,
+    SUNFLOWER_CHECKPOINT_DIR,
 )
 from src.utils.runtime import get_runtime
 
@@ -106,6 +107,7 @@ def chat_gate_ok(
     candidates = [
         Path(__file__).resolve().parents[2] / "additional_scripts" / "eval_chat.py",
         Path(__file__).resolve().parents[2] / "scripts" / "eval_chat.py",
+        Path(__file__).resolve().parents[2] / "gemma-4_inference_scripts" / "eval_chat.py",
     ]
     eval_chat = next((p for p in candidates if p.exists()), None)
     if eval_chat is None:
@@ -146,6 +148,7 @@ def run_publish(args) -> None:
 
     processor = AutoProcessor.from_pretrained(rt.base_model_id)
 
+    is_sunflower = "sunflower" in rt.base_model_id.lower()
     adapter_card = textwrap.dedent(
         f"""
     ---
@@ -153,20 +156,21 @@ def run_publish(args) -> None:
     library_name: peft
     license: gemma
     language: [sw]
-    tags: [automatic-speech-recognition, swahili, gemma-4, lora]
+    tags: [automatic-speech-recognition, swahili, gemma-4, lora{", sunflower" if is_sunflower else ""}]
     datasets: [{SRC_DATASETS[0]}, {SRC_DATASETS[1]}]
     ---
 
-    # Gemma 4 - Swahili ASR (ndizi)
+    # {"Sunflower-Gemma4-E2B" if is_sunflower else "Gemma 4"} — Swahili ASR (Ndizi)
 
     LoRA fine-tune of `{rt.base_model_id}` for Swahili ASR on
-    `{SRC_DATASETS[0]}` + `{SRC_DATASETS[1]}` (concatenated).
+    `{SRC_DATASETS[0]}` + `{SRC_DATASETS[1]}`.
+    {"Training mode: asr_moderate (tail LoRA + projector save). FLEURS/SALT/Common Voice were not used as train data." if is_sunflower else ""}
 
     ## Evaluation
     {wer_table()}
 
     ## Training
-    QLoRA (4-bit nf4, bf16 compute), rank 32 alpha 64, audio projector unfrozen.
+    QLoRA (4-bit nf4, bf16 compute). {"asr_moderate tail LoRA (r=8) + unfrozen audio projector." if is_sunflower else "rank 32 alpha 64, audio projector unfrozen."}
 
   Merged weights: [{rt.merged_model_repo}](https://huggingface.co/{rt.merged_model_repo})
     """
@@ -194,7 +198,13 @@ def run_publish(args) -> None:
     """
     ).strip()
 
-    adapter_dir = CHECKPOINT_DIR / "best"
+    ckpt = getattr(args, "checkpoint", None)
+    if ckpt:
+        adapter_dir = Path(ckpt)
+    elif "sunflower" in rt.base_model_id.lower():
+        adapter_dir = SUNFLOWER_CHECKPOINT_DIR / "best"
+    else:
+        adapter_dir = CHECKPOINT_DIR / "best"
 
     # Chat gate — runs before any merge/upload.
     skip_chat = bool(getattr(args, "skip_chat_gate", False))

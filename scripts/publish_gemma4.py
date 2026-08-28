@@ -16,6 +16,12 @@ from src.utils.runtime import apply_model_choice  # noqa: E402
 def main() -> int:
     p = argparse.ArgumentParser(description=__doc__)
     p.add_argument("--model", default="E2B")
+    p.add_argument(
+        "--checkpoint",
+        default=None,
+        help="LoRA adapter directory (default: artifacts/checkpoints/best, or "
+        "artifacts/checkpoints_sunflower_ndizi/best when --model is Sunflower).",
+    )
     g = p.add_mutually_exclusive_group(required=True)
     g.add_argument("--adapter-only", dest="merged", action="store_false")
     g.add_argument("--merged", dest="merged", action="store_true")

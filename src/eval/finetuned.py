@@ -322,3 +322,10 @@ def run_evaluate(args) -> None:
         retention_results = {"retention_test": results.get("retention_test")}
         RETENTION_FINETUNED_JSON.write_text(json.dumps(retention_results, indent=2), encoding="utf-8")
         print("Wrote", RETENTION_FINETUNED_JSON)
+
+    del model, processor
+    import gc
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()

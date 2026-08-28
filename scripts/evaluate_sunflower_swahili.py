@@ -1,23 +1,30 @@
 #!/usr/bin/env python3
-"""Evaluate Sunflower-Gemma4-E2B (base or Ndizi LoRA) — ASR + Swahili chat.
+"""Evaluate Sunflower-Gemma4-E2B vs an Ndizi LoRA checkpoint — ASR + Swahili chat.
 
 ASR eval sets are held-out: Ndizi test (in-domain) and FLEURS sw_ke test (OOD).
-FLEURS / SALT / Common Voice / Waxal are never used as training data here.
+By default both the **base model** and the **LoRA checkpoint** are scored so you
+can see whether Ndizi WER improved.
 
   python scripts/evaluate_sunflower_swahili.py \\
     --checkpoint artifacts/checkpoints_sunflower_ndizi/best \\
-    --output-dir eval/sunflower-ndizi
+    --output-dir eval/sunflower-ndizi \\
+    --max-samples 32
 
-  # Base Sunflower, no adapter (pre-finetune baseline)
+  # Base only
   python scripts/evaluate_sunflower_swahili.py --no-adapter --max-samples 32
+
+  # Checkpoint only (skip base)
+  python scripts/evaluate_sunflower_swahili.py --skip-base --max-samples 32
 """
 from __future__ import annotations
 
 import argparse
+import gc
 import json
 import os
 import sys
 from pathlib import Path
+from types import SimpleNamespace
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
@@ -34,6 +41,14 @@ def load_env_file(env_path: Path) -> None:
         k, v = k.strip(), v.strip().strip("'").strip('"')
         if k and k not in os.environ:
             os.environ[k] = v
+
+
+def _free_cuda() -> None:
+    import torch
+
+    gc.collect()
+    if torch.cuda.is_available():
+        torch.cuda.empty_cache()
 
 
 def _chat_once(model, processor, prompt: str, system_prompt: str, max_new_tokens: int) -> str:
@@ -120,6 +135,138 @@ def run_chat_eval(args, model, processor, out_dir: Path) -> dict:
     return summary
 
 
+def _is_ndizi(name: str) -> bool:
+    return "ndizi" in name.lower()
+
+
+def _weighted_wer(per_set: dict, predicate) -> dict | None:
+    rows = [v for k, v in per_set.items() if predicate(k) and v.get("wer") is not None]
+    n = sum(int(r.get("n") or 0) for r in rows)
+    if not n:
+        return None
+    wer = sum(float(r["wer"]) * int(r.get("n") or 0) for r in rows) / n
+    cer_rows = [r for r in rows if r.get("cer") is not None]
+    cer = None
+    if cer_rows:
+        cn = sum(int(r.get("n") or 0) for r in cer_rows)
+        cer = sum(float(r["cer"]) * int(r.get("n") or 0) for r in cer_rows) / max(cn, 1)
+    return {"wer": wer, "cer": cer, "n": n}
+
+
+def _fmt(x) -> str:
+    if x is None:
+        return "   n/a"
+    return f"{float(x):6.3f}"
+
+
+def compare_asr(base_metrics: dict | None, tuned_metrics: dict | None) -> dict:
+    base_sets = (base_metrics or {}).get("per_set") or {}
+    tuned_sets = (tuned_metrics or {}).get("per_set") or {}
+    names = list(dict.fromkeys([*base_sets, *tuned_sets]))
+    rows = []
+    for name in names:
+        b = base_sets.get(name) or {}
+        t = tuned_sets.get(name) or {}
+        bw, tw = b.get("wer"), t.get("wer")
+        delta = None if bw is None or tw is None else float(tw) - float(bw)
+        improved = delta is not None and delta < -1e-6
+        rows.append(
+            {
+                "set": name,
+                "ndizi": _is_ndizi(name),
+                "n": t.get("n") or b.get("n"),
+                "wer_base": bw,
+                "wer_lora": tw,
+                "delta_wer": delta,
+                "cer_base": b.get("cer"),
+                "cer_lora": t.get("cer"),
+                "improved": improved,
+            }
+        )
+
+    ndizi_base = _weighted_wer(base_sets, _is_ndizi)
+    ndizi_tuned = _weighted_wer(tuned_sets, _is_ndizi)
+    ndizi_delta = None
+    if ndizi_base and ndizi_tuned:
+        ndizi_delta = float(ndizi_tuned["wer"]) - float(ndizi_base["wer"])
+
+    pooled_base = (base_metrics or {}).get("pooled") or {}
+    pooled_tuned = (tuned_metrics or {}).get("pooled") or {}
+    pooled_delta = None
+    if pooled_base.get("wer") is not None and pooled_tuned.get("wer") is not None:
+        pooled_delta = float(pooled_tuned["wer"]) - float(pooled_base["wer"])
+
+    comparison = {
+        "per_set": rows,
+        "ndizi": {
+            "wer_base": None if not ndizi_base else ndizi_base["wer"],
+            "wer_lora": None if not ndizi_tuned else ndizi_tuned["wer"],
+            "delta_wer": ndizi_delta,
+            "n": None if not ndizi_tuned else ndizi_tuned["n"],
+            "improved": ndizi_delta is not None and ndizi_delta < -1e-6,
+        },
+        "pooled": {
+            "wer_base": pooled_base.get("wer"),
+            "wer_lora": pooled_tuned.get("wer"),
+            "delta_wer": pooled_delta,
+        },
+        "note": "delta_wer = LoRA − base; negative means the adapter improved (lower WER).",
+    }
+
+    print(f"\n{'═'*72}")
+    print("ASR COMPARISON  (WER; lower is better.  Δ = LoRA − base; negative = improved)")
+    print(f"{'═'*72}")
+    print(f"{'set':<42} {'n':>5} {'base':>7} {'LoRA':>7} {'ΔWER':>8}  {'Ndizi?'}")
+    print("-" * 72)
+    for row in rows:
+        tag = "yes" if row["ndizi"] else ""
+        d = "   n/a" if row["delta_wer"] is None else f"{row['delta_wer']:+7.3f}"
+        mark = "  ← improved" if row["improved"] else ("  ← worse" if row["delta_wer"] and row["delta_wer"] > 1e-6 else "")
+        print(
+            f"{row['set']:<42} {str(row['n'] or ''):>5} "
+            f"{_fmt(row['wer_base'])} {_fmt(row['wer_lora'])} {d}  {tag}{mark}"
+        )
+    print("-" * 72)
+    nd = comparison["ndizi"]
+    d = "   n/a" if nd["delta_wer"] is None else f"{nd['delta_wer']:+7.3f}"
+    verdict = "IMPROVED on Ndizi" if nd["improved"] else (
+        "NO Ndizi gain" if nd["delta_wer"] is not None else "n/a"
+    )
+    print(
+        f"{'Ndizi pooled (in-domain)':<42} {str(nd['n'] or ''):>5} "
+        f"{_fmt(nd['wer_base'])} {_fmt(nd['wer_lora'])} {d}  {verdict}"
+    )
+    print(f"{'All sets pooled':<42} {'':>5} {_fmt(comparison['pooled']['wer_base'])} "
+          f"{_fmt(comparison['pooled']['wer_lora'])} "
+          f"{'   n/a' if pooled_delta is None else f'{pooled_delta:+7.3f}'}")
+    print()
+    return comparison
+
+
+def _run_variant(args, *, no_adapter: bool, out_dir: Path, run_evaluate, label: str) -> tuple[dict | None, dict | None]:
+    print(f"\n{'█'*72}\n  {label}\n{'█'*72}")
+    variant = SimpleNamespace(**vars(args))
+    variant.no_adapter = no_adapter
+    variant.output_dir = str(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+
+    asr_metrics = None
+    if not args.no_asr:
+        run_evaluate(variant)
+        metrics_file = out_dir / "metrics.json"
+        if metrics_file.exists():
+            asr_metrics = json.loads(metrics_file.read_text(encoding="utf-8"))
+        _free_cuda()
+
+    chat_summary = None
+    if not args.no_chat:
+        model, processor = load_eval_model(variant)
+        chat_summary = run_chat_eval(variant, model, processor, out_dir)
+        del model, processor
+        _free_cuda()
+    return asr_metrics, chat_summary
+
+
 def main() -> int:
     load_env_file(ROOT / ".env")
     os.chdir(ROOT)
@@ -139,6 +286,11 @@ def main() -> int:
     p.add_argument("--model", default=SUNFLOWER_MODEL_ID, help="Sunflower (or other) multimodal base")
     p.add_argument("--checkpoint", default=str(SUNFLOWER_CHECKPOINT_DIR / "best"))
     p.add_argument("--no-adapter", action="store_true", help="Evaluate the base Sunflower weights only")
+    p.add_argument(
+        "--skip-base",
+        action="store_true",
+        help="Skip the base-model pass (checkpoint only). Default is base + checkpoint.",
+    )
     p.add_argument(
         "--test-datasets",
         nargs="+",
@@ -174,34 +326,61 @@ def main() -> int:
 
     if args.no_asr and args.no_chat:
         raise SystemExit("Nothing to run: both --no-asr and --no-chat")
+    compare = not args.no_adapter and not args.skip_base
     if not args.no_adapter and not Path(args.checkpoint).is_dir():
         raise SystemExit(
             f"LoRA checkpoint not found: {args.checkpoint}\n"
             "Train first, or pass --no-adapter to score the base Sunflower weights."
         )
 
-    if not args.no_asr:
-        run_evaluate(args)
+    base_asr = base_chat = tuned_asr = tuned_chat = None
+    if compare:
+        base_asr, base_chat = _run_variant(
+            args, no_adapter=True, out_dir=out_dir / "base", run_evaluate=run_evaluate,
+            label=f"BASE  {args.model}",
+        )
+        tuned_asr, tuned_chat = _run_variant(
+            args, no_adapter=False, out_dir=out_dir / "checkpoint", run_evaluate=run_evaluate,
+            label=f"LORA  {args.checkpoint}",
+        )
+        comparison = compare_asr(base_asr, tuned_asr) if not args.no_asr else None
+        if comparison:
+            (out_dir / "comparison.json").write_text(
+                json.dumps(comparison, indent=2, ensure_ascii=False), encoding="utf-8"
+            )
+            print("Wrote", out_dir / "comparison.json")
+    elif args.no_adapter:
+        base_asr, base_chat = _run_variant(
+            args, no_adapter=True, out_dir=out_dir, run_evaluate=run_evaluate,
+            label=f"BASE  {args.model}",
+        )
+        comparison = None
+    else:
+        tuned_asr, tuned_chat = _run_variant(
+            args, no_adapter=False, out_dir=out_dir, run_evaluate=run_evaluate,
+            label=f"LORA  {args.checkpoint}",
+        )
+        comparison = None
 
-    chat_summary = None
-    if not args.no_chat:
-        model, processor = load_eval_model(args)
-        chat_summary = run_chat_eval(args, model, processor, out_dir)
+    def _chat_brief(s):
+        return None if s is None else {k: s[k] for k in ("n", "n_pass", "pass_rate")}
 
     payload = {
         "model": args.model,
         "checkpoint": None if args.no_adapter else args.checkpoint,
         "test_datasets": args.test_datasets,
-        "chat": {k: chat_summary[k] for k in ("n", "n_pass", "pass_rate")} if chat_summary else None,
+        "max_samples": args.max_samples,
+        "compared": compare,
+        "base": {"asr": base_asr, "chat": _chat_brief(base_chat)},
+        "lora": {"asr": tuned_asr, "chat": _chat_brief(tuned_chat)},
+        "comparison": comparison,
     }
-    metrics_file = out_dir / "metrics.json"
-    if metrics_file.exists():
-        payload["asr_metrics"] = json.loads(metrics_file.read_text(encoding="utf-8"))
     summary_path = out_dir / "summary.json"
     summary_path.write_text(json.dumps(payload, indent=2, ensure_ascii=False), encoding="utf-8")
     print("Wrote", summary_path)
 
-    if chat_summary is not None and chat_summary["pass_rate"] < 0.5:
+    chat_for_gate = tuned_chat or base_chat
+    if chat_for_gate is not None and chat_for_gate["pass_rate"] < 0.5:
         print("[warn] chat pass_rate < 0.5 — consider asr_moderate, lower merge scale, or more --chat-ratio")
         return 1
     return 0

@@ -23,6 +23,7 @@ AFRICAN_EVAL_ASR = [
     "google/fleurs:sw_ke:test",
     "google/WaxalNLP:amh_asr:test",
     "google/WaxalNLP:orm_asr:test",
+    "turiabu/Sagalee:test",
 ]
 
 # Multilingual on-device mix: Ndizi + other Swahili + WaxalNLP Amharic/Oromo.
@@ -95,6 +96,18 @@ ASR_PROMPT_MAP = {
     "om": LANG_ASR_PROMPTS["om"],
     "sw": LANG_ASR_PROMPTS["sw"],
 }
+
+
+def eval_asr_instruction_for_set(dataset_key: str, *, fallback: str | None = None) -> str:
+    """Pick the train-time prompt from an eval split name (Ndizi/FLEURS/Waxal/Sagalee)."""
+    n = (dataset_key or "").lower()
+    if "amh_asr" in n or "waxalnlp:amh" in n:
+        return LANG_ASR_PROMPTS["am"]
+    if "orm_asr" in n or "waxalnlp:orm" in n or "sagalee" in n:
+        return LANG_ASR_PROMPTS["om"]
+    if fallback:
+        return fallback
+    return LANG_ASR_PROMPTS["sw"]
 
 
 def resolve_asr_prompt(style: str | None) -> str:

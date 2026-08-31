@@ -314,14 +314,20 @@ def main() -> int:
     p.add_argument("--chunk_length_s", type=float, default=30.0)
     p.add_argument(
         "--asr-prompt",
-        choices=tuple(ASR_PROMPT_MAP),
+        choices=(*ASR_PROMPT_MAP, "auto"),
         default="ondevice",
-        help="Must match training and LiteRT: ondevice/sw = Swahili; am/om = Waxal train prompts.",
+        help="ondevice/sw = Swahili; am/om = Waxal train prompts; auto = pick by dataset.",
     )
     add_normalize_arg(p, default=TEXT_NORMALIZE_EVAL_DEFAULT)
     args = p.parse_args()
-    args.asr_instruction = resolve_asr_prompt(args.asr_prompt)
-    print(f"[eval] ASR prompt: {args.asr_prompt} ({args.asr_instruction})")
+    if args.asr_prompt == "auto":
+        from src.utils.constants import LANG_ASR_PROMPTS
+
+        args.asr_instruction = LANG_ASR_PROMPTS["sw"]
+        print("[eval] ASR prompt: auto (Swahili / Amharic / Oromo by dataset name)")
+    else:
+        args.asr_instruction = resolve_asr_prompt(args.asr_prompt)
+        print(f"[eval] ASR prompt: {args.asr_prompt} ({args.asr_instruction})")
     args.no_auto_chunk = False
     args.stride_length_s = None
     args.max_audio_seconds = None

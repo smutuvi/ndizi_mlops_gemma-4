@@ -91,6 +91,9 @@ ASR_PROMPT_MAP = {
     "short": SHORT_ASR_INSTRUCTION,
     "full": ASR_INSTRUCTION,
     "punctuation": PUNCTUATION_ASR_INSTRUCTION,
+    "am": LANG_ASR_PROMPTS["am"],
+    "om": LANG_ASR_PROMPTS["om"],
+    "sw": LANG_ASR_PROMPTS["sw"],
 }
 
 

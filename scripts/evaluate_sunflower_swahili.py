@@ -316,7 +316,7 @@ def main() -> int:
         "--asr-prompt",
         choices=tuple(ASR_PROMPT_MAP),
         default="ondevice",
-        help="Must match training and LiteRT: ondevice = 'Andika maneno unayosikia katika sauti hii.'",
+        help="Must match training and LiteRT: ondevice/sw = Swahili; am/om = Waxal train prompts.",
     )
     add_normalize_arg(p, default=TEXT_NORMALIZE_EVAL_DEFAULT)
     args = p.parse_args()

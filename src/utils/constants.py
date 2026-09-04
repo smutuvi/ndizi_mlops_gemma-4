@@ -17,25 +17,39 @@ SUNFLOWER_EVAL_ASR = [
     "smutuvi/ndizi-1-2025:test",
     "google/fleurs:sw_ke:test",
 ]
+# Unofficial CV 18 mirror (mozilla-foundation/common_voice_18_0 left Hugging Face).
+COMMON_VOICE_18_ID = "fsicoli/common_voice_18_0"
+COMMON_VOICE_EVAL_MAX = 500  # test clips per CV language; FLEURS is not capped.
+
 AFRICAN_EVAL_ASR = [
     "smutuvi/ndizi-1:test",
     "smutuvi/ndizi-1-2025:test",
     "google/fleurs:sw_ke:test",
+    "google/fleurs:am_et:test",
+    "google/fleurs:om_et:test",
     "google/WaxalNLP:amh_asr:test",
     "google/WaxalNLP:orm_asr:test",
+    "snapwre/amharic-speech:test",
     "turiabu/Sagalee:test",
+    f"{COMMON_VOICE_18_ID}:sw:test",
+    f"{COMMON_VOICE_18_ID}:am:test",
 ]
 
-# Multilingual on-device mix: Ndizi + other Swahili + WaxalNLP Amharic/Oromo.
-# Test splits are never used for training. Waxal train is capped unless --full-waxal.
+# Multilingual on-device mix: Ndizi + other Swahili + WaxalNLP Amharic/Oromo
+# + Dataset.ET / ALFFA Amharic + capped Sagalee Oromo.
+# Hub *test* splits are never loaded. Waxal/Sagalee train are capped unless --full-*.
+# FLEURS is eval-only (likely already in Sunflower). Sagalee is CC BY-NC 4.0.
+# Afrivoice is omitted (likely Waxal duplicate).
 AFRICAN_ASR_SOURCES = (
     {"id": "smutuvi/ndizi-1", "config": None, "lang": "sw", "max_train": None},
     {"id": "smutuvi/ndizi-1-2025", "config": None, "lang": "sw", "max_train": None},
-    {"id": "google/fleurs", "config": "sw_ke", "lang": "sw", "max_train": None},
     {"id": "nickdee96/ALFFA-Swahili-News", "config": None, "lang": "sw", "max_train": None},
     {"id": "Sunbird/salt", "config": "studio-swa", "lang": "sw", "max_train": 20_000},
+    {"id": "hadamard-2/alffa-amharic", "config": None, "lang": "am", "max_train": None},
+    {"id": "snapwre/amharic-speech", "config": None, "lang": "am", "max_train": None},
     {"id": "google/WaxalNLP", "config": "amh_asr", "lang": "am", "max_train": 20_000},
     {"id": "google/WaxalNLP", "config": "orm_asr", "lang": "om", "max_train": 20_000},
+    {"id": "turiabu/Sagalee", "config": None, "lang": "om", "max_train": 20_000, "val_split": "dev"},
 )
 LANG_ASR_PROMPTS = {
     "sw": "Andika maneno unayosikia katika sauti hii.",
@@ -99,11 +113,19 @@ ASR_PROMPT_MAP = {
 
 
 def eval_asr_instruction_for_set(dataset_key: str, *, fallback: str | None = None) -> str:
-    """Pick the train-time prompt from an eval split name (Ndizi/FLEURS/Waxal/Sagalee)."""
+    """Pick the train-time prompt from an eval split name (Ndizi/FLEURS/Waxal/Sagalee/CV)."""
     n = (dataset_key or "").lower()
-    if "amh_asr" in n or "waxalnlp:amh" in n:
+    if (
+        "amh_asr" in n
+        or "waxalnlp:amh" in n
+        or "am_et" in n
+        or ":am:" in n
+        or n.endswith(":am")
+        or "amharic" in n
+        or "alffa-amharic" in n
+    ):
         return LANG_ASR_PROMPTS["am"]
-    if "orm_asr" in n or "waxalnlp:orm" in n or "sagalee" in n:
+    if "orm_asr" in n or "waxalnlp:orm" in n or "sagalee" in n or "om_et" in n or ":om:" in n:
         return LANG_ASR_PROMPTS["om"]
     if fallback:
         return fallback

@@ -14,19 +14,32 @@ class SplitSpec:
     dataset_id: str
     split: str
     config: str | None = None
+    max_samples: int | None = None
 
     @classmethod
     def parse(cls, raw: str) -> SplitSpec:
-        """Parse ``repo:split`` or ``repo:config:split`` (e.g. google/fleurs:sw_ke:test)."""
+        """Parse ``repo:split``, ``repo:config:split``, or either with a trailing ``:N`` cap.
+
+        Examples: ``google/fleurs:sw_ke:test``, ``fsicoli/common_voice_18_0:sw:test:500``.
+        """
         s = raw.strip()
-        if ":" not in s:
-            return cls(s, "test")
+        cap = None
         parts = s.split(":")
+        if parts and parts[-1].isdigit():
+            cap = int(parts[-1])
+            parts = parts[:-1]
+        if not parts:
+            return cls(s, "test", max_samples=cap)
+        if len(parts) == 1:
+            return cls(parts[0].strip(), "test", max_samples=cap)
         if len(parts) == 2:
-            return cls(parts[0].strip(), parts[1].strip() or "test")
-        if len(parts) >= 3:
-            return cls(parts[0].strip(), parts[-1].strip() or "test", config=parts[1].strip() or None)
-        return cls(s, "test")
+            return cls(parts[0].strip(), parts[1].strip() or "test", max_samples=cap)
+        return cls(
+            parts[0].strip(),
+            parts[-1].strip() or "test",
+            config=parts[1].strip() or None,
+            max_samples=cap,
+        )
 
 
 def resolve_columns(column_names: list[str]) -> tuple[str, str]:
@@ -69,10 +82,25 @@ def max_clip_duration_s(ds: Dataset, sample_n: int | None = None) -> float:
     return m
 
 
+def _cap_n(
+    spec: SplitSpec,
+    *,
+    max_samples: int | None,
+    cv_max_samples: int | None,
+) -> int | None:
+    n = spec.max_samples
+    if n is None and cv_max_samples is not None and "common_voice" in spec.dataset_id.lower():
+        n = cv_max_samples
+    if max_samples is not None:
+        n = max_samples if n is None else min(n, max_samples)
+    return n
+
+
 def load_hub_eval_splits(
     specs: list[str],
     *,
     max_samples: int | None = None,
+    cv_max_samples: int | None = None,
     dataset_revision: str | None = None,
     audio_column: str | None = None,
     text_column: str | None = None,
@@ -97,8 +125,12 @@ def load_hub_eval_splits(
             a_col, t_col = resolve_columns(list(ds.column_names))
         ds = _standardize_columns(ds, a_col, t_col)
         ds = ds.add_column("source_dataset", [spec.dataset_id] * len(ds))
-        if max_samples is not None:
-            ds = ds.select(range(min(max_samples, len(ds))))
+        cap = _cap_n(spec, max_samples=max_samples, cv_max_samples=cv_max_samples)
+        if cap is not None:
+            take = min(cap, len(ds))
+            if take < len(ds):
+                print(f"[eval]   capping {key}: {len(ds):,} → {take:,}")
+            ds = ds.select(range(take))
         out[key] = ds
         print(f"[eval]   {len(ds):,} rows")
     return out

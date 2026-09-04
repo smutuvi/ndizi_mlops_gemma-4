@@ -1,20 +1,17 @@
 #!/usr/bin/env python3
-"""Train Sunflower-Gemma4 on Ndizi + other Swahili ASR + WaxalNLP Amharic/Oromo.
+"""Train Sunflower-Gemma4 on Ndizi + other Swahili ASR + Amharic/Oromo.
 
 Uses the Gemma 4 QLoRA path that actually runs (batch size 1, no dtype= with
 BitsAndBytes, LM-only LoRA regex, audio_tower left in bf16). Per-row ASR prompts:
 Swahili LiteRT string, short Amharic / Oromo prompts.
 
-Hub *test* splits are never loaded into train. FLEURS sw_ke test stays eval-only.
+Hub *test* splits are never loaded into train. Sagalee is CC BY-NC 4.0.
 
   python scripts/train_gemma4_african_asr.py --prepare
 
   python scripts/train_gemma4_african_asr.py \\
     --training-mode asr_moderate --asr-prompt ondevice \\
-    --output-dir artifacts/checkpoints_african_asr
-
-  # Uncapped Waxal (large download)
-  python scripts/train_gemma4_african_asr.py --prepare --full-waxal --train
+    --output-dir artifacts/checkpoints_african_asr_v2
 """
 from __future__ import annotations
 
@@ -60,6 +57,8 @@ def main() -> int:
     )
     p.add_argument("--waxal-max", type=int, default=20_000, help="Cap WaxalNLP train rows per language.")
     p.add_argument("--full-waxal", action="store_true", help="Do not cap WaxalNLP train splits.")
+    p.add_argument("--sagalee-max", type=int, default=20_000, help="Cap Sagalee train rows (CC BY-NC 4.0).")
+    p.add_argument("--full-sagalee", action="store_true", help="Do not cap Sagalee train (50k rows / ~94 h).")
     p.add_argument("--sw-prob", type=float, default=0.5)
     p.add_argument("--am-prob", type=float, default=0.25)
     p.add_argument("--om-prob", type=float, default=0.25)

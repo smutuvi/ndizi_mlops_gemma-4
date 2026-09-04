@@ -37,14 +37,9 @@ from types import SimpleNamespace
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT))
 
-DEFAULT_TEST_DATASETS = [
-    "smutuvi/ndizi-1:test",
-    "smutuvi/ndizi-1-2025:test",
-    "google/fleurs:sw_ke:test",
-    "google/WaxalNLP:amh_asr:test",
-    "google/WaxalNLP:orm_asr:test",
-    "turiabu/Sagalee:test",
-]
+from src.utils.constants import AFRICAN_EVAL_ASR, COMMON_VOICE_EVAL_MAX
+
+DEFAULT_TEST_DATASETS = list(AFRICAN_EVAL_ASR)
 SAGALEE_TEST = "turiabu/Sagalee:test"
 
 
@@ -148,7 +143,13 @@ def main() -> int:
     p.add_argument("--skip-google", action="store_true")
     p.add_argument("--output-dir", default="eval/google-gemma4-e2b-base")
     p.add_argument("--batch-size", type=int, default=1)
-    p.add_argument("--max-samples", type=int, default=None)
+    p.add_argument("--max-samples", type=int, default=None, help="Cap every set (smoke). Unset = full tests except Common Voice.")
+    p.add_argument(
+        "--cv-max-samples",
+        type=int,
+        default=COMMON_VOICE_EVAL_MAX,
+        help="Cap only Common Voice test splits (default 500). FLEURS is not capped. 0 = no CV cap.",
+    )
     p.add_argument("--fp16", action="store_true")
     p.add_argument("--chunk_length_s", type=float, default=30.0)
     p.add_argument("--audio-column", default=None)
@@ -188,7 +189,11 @@ def main() -> int:
     args.max_audio_seconds = None
     args.retention_eval = False
     args.baseline = False
+    if args.cv_max_samples is not None and args.cv_max_samples <= 0:
+        args.cv_max_samples = None
     print("[eval] sets:", " ".join(args.test_datasets))
+    if args.cv_max_samples:
+        print(f"[eval] Common Voice test cap: {args.cv_max_samples}")
 
     out = Path(args.output_dir)
     out.mkdir(parents=True, exist_ok=True)

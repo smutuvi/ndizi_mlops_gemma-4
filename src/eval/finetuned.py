@@ -93,6 +93,7 @@ def _load_eval_tests(args) -> dict:
         return load_hub_eval_splits(
             args.test_datasets,
             max_samples=getattr(args, "max_samples", None),
+            cv_max_samples=getattr(args, "cv_max_samples", None),
             dataset_revision=getattr(args, "dataset_revision", None),
             audio_column=getattr(args, "audio_column", None),
             text_column=getattr(args, "text_column", None),

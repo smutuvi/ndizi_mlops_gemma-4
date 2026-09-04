@@ -71,10 +71,27 @@ def _load_split(spec: dict[str, Any], split: str) -> Dataset | None:
     return _tag(ds, spec)
 
 
+def _load_val(spec: dict[str, Any]) -> Dataset | None:
+    names = []
+    preferred = spec.get("val_split")
+    if preferred:
+        names.append(preferred)
+    for name in ("validation", "dev"):
+        if name not in names:
+            names.append(name)
+    for name in names:
+        ds = _load_split(spec, name)
+        if ds is not None:
+            return ds
+    return None
+
+
 def run_prepare_african_asr(args) -> DatasetDict:
     """Build a multilingual train/val set. Never includes Hub test splits."""
     waxal_max = getattr(args, "waxal_max", None)
     full_waxal = bool(getattr(args, "full_waxal", False))
+    sagalee_max = getattr(args, "sagalee_max", None)
+    full_sagalee = bool(getattr(args, "full_sagalee", False))
     sw_p = float(getattr(args, "sw_prob", 0.5))
     am_p = float(getattr(args, "am_prob", 0.25))
     om_p = float(getattr(args, "om_prob", 0.25))
@@ -103,6 +120,12 @@ def run_prepare_african_asr(args) -> DatasetDict:
                 cap = None
             elif waxal_max is not None:
                 cap = int(waxal_max)
+        elif spec["id"] == "turiabu/Sagalee":
+            print("[mix] Sagalee is CC BY-NC 4.0 (non-commercial). Skip this source if the product is commercial.")
+            if full_sagalee:
+                cap = None
+            elif sagalee_max is not None:
+                cap = int(sagalee_max)
 
         train = _load_split(spec, "train")
         if train is not None:
@@ -111,7 +134,7 @@ def run_prepare_african_asr(args) -> DatasetDict:
                 print(f"    capped train → {len(train):,}")
             by_lang_train[spec["lang"]].append(train)
 
-        val = _load_split(spec, "validation")
+        val = _load_val(spec)
         if val is not None:
             by_lang_val[spec["lang"]].append(_cap(val, 256))
 

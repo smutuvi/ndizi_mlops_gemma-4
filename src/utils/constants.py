@@ -40,13 +40,15 @@ AFRICAN_EVAL_ASR = [
 # Hub *test* splits are never loaded. Waxal/Sagalee train are capped unless --full-*.
 # FLEURS is eval-only (likely already in Sunflower). Sagalee is CC BY-NC 4.0.
 # Afrivoice is omitted (likely Waxal duplicate).
+# Amharic ALFFA/Dataset.ET capped at 15k so lang pools stay closer in size;
+# prepare uses stopping_strategy=first_exhausted so Swahili is not replayed.
 AFRICAN_ASR_SOURCES = (
     {"id": "smutuvi/ndizi-1", "config": None, "lang": "sw", "max_train": None},
     {"id": "smutuvi/ndizi-1-2025", "config": None, "lang": "sw", "max_train": None},
     {"id": "nickdee96/ALFFA-Swahili-News", "config": None, "lang": "sw", "max_train": None},
     {"id": "Sunbird/salt", "config": "studio-swa", "lang": "sw", "max_train": 20_000},
-    {"id": "hadamard-2/alffa-amharic", "config": None, "lang": "am", "max_train": None},
-    {"id": "snapwre/amharic-speech", "config": None, "lang": "am", "max_train": None},
+    {"id": "hadamard-2/alffa-amharic", "config": None, "lang": "am", "max_train": 15_000},
+    {"id": "snapwre/amharic-speech", "config": None, "lang": "am", "max_train": 15_000},
     {"id": "google/WaxalNLP", "config": "amh_asr", "lang": "am", "max_train": 20_000},
     {"id": "google/WaxalNLP", "config": "orm_asr", "lang": "om", "max_train": 20_000},
     {"id": "turiabu/Sagalee", "config": None, "lang": "om", "max_train": 20_000, "val_split": "dev"},

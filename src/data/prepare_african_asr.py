@@ -154,15 +154,18 @@ def run_prepare_african_asr(args) -> DatasetDict:
     probs = [max(weight.get(lang, 0.1), 1e-6) for lang in order]
     z = sum(probs)
     probs = [p / z for p in probs]
-    print(f"[mix] interleave langs={order} probs={[round(p, 3) for p in probs]}")
+    print(f"[mix] interleave langs={order} probs={[round(p, 3) for p in probs]} strategy=first_exhausted")
     if len(order) == 1:
         train = lang_trains[order[0]]
     else:
+        # first_exhausted: stop when the smallest lang pool runs out under the
+        # sampling probs. all_exhausted replays smaller pools (often Swahili)
+        # until Amharic/Oromo are done — that hurt FLEURS sw_ke on v2.
         train = interleave_datasets(
             [lang_trains[lang] for lang in order],
             probabilities=probs,
             seed=42,
-            stopping_strategy="all_exhausted",
+            stopping_strategy="first_exhausted",
         )
 
     val_parts = by_lang_val.get("sw") or []

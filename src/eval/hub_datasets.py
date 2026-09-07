@@ -115,6 +115,9 @@ def load_hub_eval_splits(
         key = f"{spec.dataset_id}:{spec.config}:{spec.split}" if spec.config else f"{spec.dataset_id}:{spec.split}"
         print(f"[eval] Loading {key}...")
         load_kw = dict(kw)
+        # Unofficial CV 18 mirror still ships a dataset loading script.
+        if "common_voice" in spec.dataset_id.lower() or spec.dataset_id.startswith("fsicoli/"):
+            load_kw["trust_remote_code"] = True
         if spec.config:
             ds = load_dataset(spec.dataset_id, spec.config, split=spec.split, **load_kw)
         else:

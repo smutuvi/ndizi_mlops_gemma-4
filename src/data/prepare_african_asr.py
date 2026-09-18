@@ -10,12 +10,13 @@ from datasets import Dataset, DatasetDict, concatenate_datasets, interleave_data
 
 from src.data.leakage import load_asr_hub_split
 from src.utils.constants import (
+    AFRICAN_ASR_CONTINUE_SOURCES,
     AFRICAN_ASR_SOURCES,
     AUDIO_COLUMN,
     LANG_ASR_PROMPTS,
     TEXT_COLUMN,
 )
-from src.utils.paths import AFRICAN_ASR_PREPARED_LOCAL
+from src.utils.paths import AFRICAN_ASR_CONTINUE_PREPARED_LOCAL, AFRICAN_ASR_PREPARED_LOCAL
 
 KEEP = (AUDIO_COLUMN, TEXT_COLUMN, "source_dataset", "task", "language", "asr_instruction")
 
@@ -92,11 +93,26 @@ def run_prepare_african_asr(args) -> DatasetDict:
     full_waxal = bool(getattr(args, "full_waxal", False))
     sagalee_max = getattr(args, "sagalee_max", None)
     full_sagalee = bool(getattr(args, "full_sagalee", False))
-    sw_p = float(getattr(args, "sw_prob", 0.5))
-    am_p = float(getattr(args, "am_prob", 0.25))
-    om_p = float(getattr(args, "om_prob", 0.25))
+    recipe = str(getattr(args, "recipe", "default") or "default")
+    stopping = str(getattr(args, "stopping_strategy", None) or "first_exhausted")
 
-    sources = [dict(s) for s in AFRICAN_ASR_SOURCES]
+    if recipe == "continue_v1":
+        sources = [dict(s) for s in AFRICAN_ASR_CONTINUE_SOURCES]
+        sw_p = float(getattr(args, "sw_prob", 0.5))
+        am_p = 0.0
+        om_p = float(getattr(args, "om_prob", 0.5))
+        # If user left default 50/25/25, rebalance to 50/50 sw/om.
+        if abs(sw_p - 0.5) < 1e-9 and abs(float(getattr(args, "am_prob", 0.25)) - 0.25) < 1e-9:
+            sw_p, om_p = 0.5, 0.5
+        default_prepared = AFRICAN_ASR_CONTINUE_PREPARED_LOCAL
+        print("[mix] recipe=continue_v1 (Ndizi/Swahili + Oromo only; no Amharic)")
+    else:
+        sources = [dict(s) for s in AFRICAN_ASR_SOURCES]
+        sw_p = float(getattr(args, "sw_prob", 0.5))
+        am_p = float(getattr(args, "am_prob", 0.25))
+        om_p = float(getattr(args, "om_prob", 0.25))
+        default_prepared = AFRICAN_ASR_PREPARED_LOCAL
+
     extra = getattr(args, "extra_asr", None) or []
     for raw in extra:
         # repo[:config][:lang]  lang defaults to sw
@@ -154,7 +170,7 @@ def run_prepare_african_asr(args) -> DatasetDict:
     probs = [max(weight.get(lang, 0.1), 1e-6) for lang in order]
     z = sum(probs)
     probs = [p / z for p in probs]
-    print(f"[mix] interleave langs={order} probs={[round(p, 3) for p in probs]} strategy=first_exhausted")
+    print(f"[mix] interleave langs={order} probs={[round(p, 3) for p in probs]} strategy={stopping}")
     if len(order) == 1:
         train = lang_trains[order[0]]
     else:
@@ -165,7 +181,7 @@ def run_prepare_african_asr(args) -> DatasetDict:
             [lang_trains[lang] for lang in order],
             probabilities=probs,
             seed=42,
-            stopping_strategy="first_exhausted",
+            stopping_strategy=stopping,
         )
 
     val_parts = by_lang_val.get("sw") or []
@@ -191,7 +207,7 @@ def run_prepare_african_asr(args) -> DatasetDict:
             for lang in sorted(counts):
                 print(f"      lang={lang}: {counts[lang]:,}")
 
-    dest = Path(getattr(args, "prepared_dir", None) or AFRICAN_ASR_PREPARED_LOCAL)
+    dest = Path(getattr(args, "prepared_dir", None) or default_prepared)
     if dest.exists():
         shutil.rmtree(dest)
     out.save_to_disk(str(dest))

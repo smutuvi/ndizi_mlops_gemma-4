@@ -18,6 +18,7 @@ from src.models.gemma4_lora import (
     build_asr_moderate_lora_config,
     build_gemma4_bnb_config,
     build_gemma4_lora_config,
+    continue_from_adapter,
     ensure_linear4bit_quant_state,
     freeze_lm_decoder,
     patch_clippable_linear_for_peft,
@@ -240,13 +241,26 @@ def run_train(cli_args) -> None:
             lora_target = getattr(cli_args, "lora_target_modules", None)
             lora = build_gemma4_lora_config(model, target_modules=lora_target)
 
-        model = apply_gemma4_lora(
-            model,
-            lora,
-            debug_targets=bool(getattr(cli_args, "debug_lora_targets", False)),
-            include_audio_tower=bool(getattr(cli_args, "unfreeze_audio_tower", False)),
-            audio_tower_last_layers=int(getattr(cli_args, "audio_tower_last_layers", 4)),
-        )
+        init_adapter = getattr(cli_args, "init_adapter", None)
+        if init_adapter:
+            init_path = Path(init_adapter)
+            if not init_path.is_dir():
+                raise SystemExit(f"--init-adapter not found: {init_path}")
+            print(f"[train] Continuing from adapter: {init_path}")
+            model = continue_from_adapter(
+                model,
+                init_path,
+                include_audio_tower=bool(getattr(cli_args, "unfreeze_audio_tower", False)),
+                audio_tower_last_layers=int(getattr(cli_args, "audio_tower_last_layers", 4)),
+            )
+        else:
+            model = apply_gemma4_lora(
+                model,
+                lora,
+                debug_targets=bool(getattr(cli_args, "debug_lora_targets", False)),
+                include_audio_tower=bool(getattr(cli_args, "unfreeze_audio_tower", False)),
+                audio_tower_last_layers=int(getattr(cli_args, "audio_tower_last_layers", 4)),
+            )
         model.print_trainable_parameters()
         if use_4bit:
             n_qs = ensure_linear4bit_quant_state(model)

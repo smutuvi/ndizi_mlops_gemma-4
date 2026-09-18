@@ -53,6 +53,29 @@ AFRICAN_ASR_SOURCES = (
     {"id": "google/WaxalNLP", "config": "orm_asr", "lang": "om", "max_train": 20_000},
     {"id": "turiabu/Sagalee", "config": None, "lang": "om", "max_train": 20_000, "val_split": "dev"},
 )
+
+# Continue-from-v1 mix: keep Ndizi Swahili, add Oromo only. No Amharic (Sunflower
+# already wins Amharic; training it caused regressions on v2/v3).
+AFRICAN_ASR_CONTINUE_SOURCES = (
+    {"id": "smutuvi/ndizi-1", "config": None, "lang": "sw", "max_train": None},
+    {"id": "smutuvi/ndizi-1-2025", "config": None, "lang": "sw", "max_train": None},
+    {"id": "nickdee96/ALFFA-Swahili-News", "config": None, "lang": "sw", "max_train": None},
+    {"id": "Sunbird/salt", "config": "studio-swa", "lang": "sw", "max_train": 20_000},
+    {"id": "google/WaxalNLP", "config": "orm_asr", "lang": "om", "max_train": 20_000},
+    {"id": "turiabu/Sagalee", "config": None, "lang": "om", "max_train": 20_000, "val_split": "dev"},
+)
+
+# Hard ship gate sets: LoRA WER must be <= Sunflower + tol on each.
+AFRICAN_ASR_GATE_MUST = (
+    "smutuvi/ndizi-1:test",
+    "smutuvi/ndizi-1-2025:test",
+    "google/fleurs:sw_ke:test",
+)
+AFRICAN_ASR_GATE_SHOULD = (
+    "google/WaxalNLP:orm_asr:test",
+    "turiabu/Sagalee:test",
+)
+
 LANG_ASR_PROMPTS = {
     "sw": "Andika maneno unayosikia katika sauti hii.",
     "am": "ይህን ንግግር በአማርኛ ጻፍ። ውጤቱ ጽሑፍ ብቻ ይሁን።",

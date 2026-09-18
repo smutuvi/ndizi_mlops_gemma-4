@@ -768,6 +768,43 @@ def load_ndizi_checkpoint(base: Any, adapter_dir: Path | str) -> Any:
     return model
 
 
+def continue_from_adapter(
+    base: Any,
+    adapter_dir: Path | str,
+    *,
+    include_audio_tower: bool = False,
+    audio_tower_last_layers: int = 4,
+) -> Any:
+    """Load an existing Ndizi/African LoRA for further training (not a fresh LoRA)."""
+    from peft import PeftConfig, PeftModel
+
+    adapter_dir = Path(adapter_dir)
+    if not (adapter_dir / "adapter_config.json").is_file():
+        raise FileNotFoundError(f"No adapter_config.json in {adapter_dir}")
+    peft_config = PeftConfig.from_pretrained(str(adapter_dir))
+    peft_config = patch_peft_config_for_kv_shared(peft_config, base)
+    model = PeftModel.from_pretrained(
+        base,
+        str(adapter_dir),
+        config=peft_config,
+        is_trainable=True,
+    )
+    if has_projector_weights(adapter_dir):
+        model = load_projector_checkpoint(model, adapter_dir)
+    n_audio = unfreeze_audio_mapper(
+        model,
+        include_audio_tower=include_audio_tower,
+        audio_tower_last_layers=audio_tower_last_layers,
+    )
+    if n_audio:
+        print(
+            f"[train] continue: unfroze {n_audio} audio tensors from {adapter_dir} "
+            f"(embed_audio{' + audio_tower' if include_audio_tower else ''})"
+        )
+    print(f"[train] continue: trainable LoRA loaded from {adapter_dir}")
+    return model
+
+
 # ── asr_moderate: tail-LoRA on last N decoder layers + full projector save ────
 
 def _count_decoder_layers(model: Any) -> int:

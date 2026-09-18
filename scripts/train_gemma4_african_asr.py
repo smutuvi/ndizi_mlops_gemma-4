@@ -12,6 +12,15 @@ Hub *test* splits are never loaded into train. Sagalee is CC BY-NC 4.0.
   python scripts/train_gemma4_african_asr.py \\
     --training-mode asr_moderate --asr-prompt ondevice \\
     --output-dir artifacts/checkpoints_african_asr_v2
+
+Continue from v1 (Swahili+Oromo only, no Amharic):
+
+  python scripts/train_gemma4_african_asr.py --prepare --train \\
+    --recipe continue_v1 \\
+    --init-adapter artifacts/checkpoints_african_asr/best \\
+    --training-mode asr_moderate --asr-prompt ondevice \\
+    --lr 1e-5 --epochs 0.5 \\
+    --output-dir artifacts/checkpoints_african_asr_v4
 """
 from __future__ import annotations
 
@@ -42,12 +51,33 @@ def main() -> int:
     os.chdir(ROOT)
 
     from src.utils.constants import SUNFLOWER_MODEL_ID, SUNFLOWER_SYSTEM_PROMPT  # noqa: E402
-    from src.utils.paths import AFRICAN_ASR_CHECKPOINT_DIR, AFRICAN_ASR_PREPARED_LOCAL  # noqa: E402
+    from src.utils.paths import (  # noqa: E402
+        AFRICAN_ASR_CHECKPOINT_DIR,
+        AFRICAN_ASR_CONTINUE_PREPARED_LOCAL,
+        AFRICAN_ASR_PREPARED_LOCAL,
+    )
 
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--model", default=SUNFLOWER_MODEL_ID)
     p.add_argument("--prepare", action="store_true")
     p.add_argument("--train", action="store_true")
+    p.add_argument(
+        "--recipe",
+        choices=("default", "continue_v1"),
+        default="default",
+        help="default = full sw/am/om mix; continue_v1 = Ndizi+Swahili+Oromo only (for --init-adapter).",
+    )
+    p.add_argument(
+        "--init-adapter",
+        default=None,
+        help="Continue training from an existing LoRA+projector dir (e.g. checkpoints_african_asr/best).",
+    )
+    p.add_argument(
+        "--stopping-strategy",
+        choices=("first_exhausted", "all_exhausted"),
+        default="first_exhausted",
+        help="interleave_datasets stopping strategy (default first_exhausted).",
+    )
     p.add_argument(
         "--extra-asr",
         nargs="*",
@@ -62,7 +92,7 @@ def main() -> int:
     p.add_argument("--sw-prob", type=float, default=0.5)
     p.add_argument("--am-prob", type=float, default=0.25)
     p.add_argument("--om-prob", type=float, default=0.25)
-    p.add_argument("--prepared-dir", default=str(AFRICAN_ASR_PREPARED_LOCAL))
+    p.add_argument("--prepared-dir", default=None)
     p.add_argument(
         "--training-mode",
         choices=("asr_safe", "asr_moderate", "asr_max"),
@@ -101,6 +131,11 @@ def main() -> int:
     p.add_argument("--output-dir", default=str(AFRICAN_ASR_CHECKPOINT_DIR))
     args = p.parse_args()
 
+    if args.prepared_dir is None:
+        args.prepared_dir = str(
+            AFRICAN_ASR_CONTINUE_PREPARED_LOCAL if args.recipe == "continue_v1" else AFRICAN_ASR_PREPARED_LOCAL
+        )
+
     do_train = args.train or not args.prepare
     if args.no_chat_mix:
         args.chat_ratio = 0.0
@@ -129,6 +164,9 @@ def main() -> int:
 
     if not Path(args.prepared_dir).exists():
         raise SystemExit(f"Prepared dataset missing: {args.prepared_dir}\nRun with --prepare first.")
+
+    if args.init_adapter and not Path(args.init_adapter).is_dir():
+        raise SystemExit(f"--init-adapter not found: {args.init_adapter}")
 
     from src.training.train import run_train
 
